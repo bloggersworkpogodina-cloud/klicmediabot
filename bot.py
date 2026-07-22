@@ -417,6 +417,7 @@ def business_menu_kb():
     kb.button(text="Мои заявки", callback_data="business_my_requests")
     kb.button(text="Отклики креаторов", callback_data="business_responses")
     kb.button(text="Мой профиль", callback_data="business_profile")
+    kb.button(text="Изменить профиль", callback_data="business_edit_profile")
     kb.button(text="Пригласить", callback_data="my_referral")
     kb.button(text="Помощь", callback_data="help_business")
     kb.adjust(1)
@@ -428,6 +429,7 @@ def creator_menu_kb():
     kb.button(text="Проекты", callback_data="creator_view_requests")
     kb.button(text="Мои отклики", callback_data="creator_my_responses")
     kb.button(text="Мой профиль", callback_data="creator_profile")
+    kb.button(text="Изменить профиль", callback_data="creator_edit_profile")
     kb.button(text="Пригласить", callback_data="my_referral")
     kb.button(text="Настройки", callback_data="creator_settings")
     kb.button(text="Помощь", callback_data="help_creator")
@@ -589,7 +591,11 @@ def contact_line(user_id: int, contact: str) -> str:
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
+
+    # Реферал фиксируется только при первом входе и больше не меняется.
     upsert_user(message, referred_by=parse_referrer(message))
+
+    # Владелец всегда попадает сразу в админ-панель.
     if is_admin(message.from_user.id):
         await message.answer(
             "<b>КЛИК | Панель владельца</b>\n\n"
@@ -598,6 +604,34 @@ async def start(message: Message, state: FSMContext):
             reply_markup=owner_reply_kb(),
         )
         return
+
+    conn = db()
+    creator = conn.execute(
+        "SELECT user_id FROM creators WHERE user_id=?",
+        (message.from_user.id,)
+    ).fetchone()
+    business = conn.execute(
+        "SELECT user_id FROM business_profiles WHERE user_id=?",
+        (message.from_user.id,)
+    ).fetchone()
+    conn.close()
+
+    # Регистрация проходится только один раз.
+    if creator:
+        await message.answer(
+            "<b>КЛИК | Медиа-маркет</b>\n\nРады видеть вас снова.",
+            reply_markup=creator_menu_kb()
+        )
+        return
+
+    if business:
+        await message.answer(
+            "<b>КЛИК | Медиа-маркет</b>\n\nРады видеть вас снова.",
+            reply_markup=business_menu_kb()
+        )
+        return
+
+    # Первичный экран только для нового пользователя без профиля.
     await message.answer(
         "<b>КЛИК | Медиа-маркет</b>\n\n"
         "Платформа, где <b>бизнес находит креаторов</b>, а <b>креаторы — проекты, рекламу и коллаборации</b>.\n\n"
@@ -1093,6 +1127,33 @@ async def creator_contact(message: Message, state: FSMContext):
         "Теперь можно смотреть актуальные проекты и откликаться на подходящие предложения.",
         reply_markup=creator_menu_kb()
     )
+
+
+# ---------- Profile editing ----------
+
+@router.callback_query(F.data == "creator_edit_profile")
+async def creator_edit_profile(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.update_data(creator_type="Блогер")
+    await state.set_state(CreatorForm.name)
+    await callback.message.edit_text(
+        "<b>Редактирование профиля блогера</b>\n\n"
+        "Пройдите анкету заново — новые ответы заменят старые.\n\n"
+        "1. Как вас зовут?"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "business_edit_profile")
+async def business_edit_profile(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(BusinessForm.business_name)
+    await callback.message.edit_text(
+        "<b>Редактирование профиля бизнеса</b>\n\n"
+        "Пройдите анкету заново — новые ответы заменят старые.\n\n"
+        "Введите название бизнеса:"
+    )
+    await callback.answer()
 
 
 # ---------- Business request creation ----------
