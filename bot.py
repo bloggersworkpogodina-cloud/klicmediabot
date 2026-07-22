@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -770,7 +771,7 @@ async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing. Add it to .env")
     init_db()
-    bot = Bot(BOT_TOKEN, parse_mode="HTML")
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     await dp.start_polling(bot)
