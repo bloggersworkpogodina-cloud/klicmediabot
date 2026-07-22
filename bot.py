@@ -89,13 +89,25 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS creators (
                 user_id BIGINT PRIMARY KEY,
                 name TEXT,
+                country TEXT,
+                region TEXT,
                 city TEXT,
                 creator_type TEXT,
                 niche TEXT,
+                work_format TEXT,
+                travel_scope TEXT,
                 social_link TEXT,
                 followers TEXT,
                 reach TEXT,
+                blog2_platform TEXT,
+                blog2_link TEXT,
+                blog2_followers TEXT,
+                blog2_reach TEXT,
+                ad_formats TEXT,
                 cooperation_formats TEXT,
+                price TEXT,
+                excluded_topics TEXT,
+                brief_ready TEXT,
                 contact TEXT,
                 status TEXT DEFAULT 'active',
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
@@ -158,6 +170,13 @@ def init_db() -> None:
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_created_at TEXT")
+        for column, coltype in [
+            ("country", "TEXT"), ("region", "TEXT"), ("work_format", "TEXT"),
+            ("travel_scope", "TEXT"), ("blog2_platform", "TEXT"), ("blog2_link", "TEXT"),
+            ("blog2_followers", "TEXT"), ("blog2_reach", "TEXT"), ("ad_formats", "TEXT"),
+            ("price", "TEXT"), ("excluded_topics", "TEXT"), ("brief_ready", "TEXT")
+        ]:
+            conn.execute(f"ALTER TABLE creators ADD COLUMN IF NOT EXISTS {column} {coltype}")
     else:
         conn.execute(
             """
@@ -246,6 +265,14 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
         if "referral_created_at" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN referral_created_at TEXT")
+        creator_columns = {r[1] for r in conn.execute("PRAGMA table_info(creators)").fetchall()}
+        for column in [
+            "country", "region", "work_format", "travel_scope", "blog2_platform",
+            "blog2_link", "blog2_followers", "blog2_reach", "ad_formats", "price",
+            "excluded_topics", "brief_ready"
+        ]:
+            if column not in creator_columns:
+                conn.execute(f"ALTER TABLE creators ADD COLUMN {column} TEXT")
     conn.commit()
     conn.close()
 
@@ -339,10 +366,41 @@ def back_to_main_kb():
 
 def creator_intro_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Начать регистрацию", callback_data="creator_register")
+    kb.button(text="Я блогер", callback_data="creator_type_blogger")
+    kb.button(text="Я контент-креатор", callback_data="creator_type_content")
     kb.button(text="Назад", callback_data="main_menu")
     kb.adjust(1)
     return kb.as_markup()
+
+
+def single_choice_kb(prefix: str, options: list[str]):
+    kb = InlineKeyboardBuilder()
+    for i, option in enumerate(options):
+        kb.button(text=option, callback_data=f"{prefix}:{i}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def multi_choice_kb(prefix: str, options: list[str], selected: list[str]):
+    kb = InlineKeyboardBuilder()
+    for i, option in enumerate(options):
+        mark = "✓ " if option in selected else ""
+        kb.button(text=f"{mark}{option}", callback_data=f"{prefix}:{i}")
+    kb.button(text="Готово", callback_data=f"{prefix}:done")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+BLOG_NICHES = [
+    "Lifestyle", "Beauty", "Fashion", "Food", "Travel", "Семья и дети",
+    "Спорт", "Бизнес", "Психология", "Образование", "Авто", "Юмор", "Другое"
+]
+BLOG_PLATFORMS = ["Instagram", "Telegram", "VK", "YouTube", "TikTok", "Threads", "Другое"]
+AD_FORMATS = [
+    "Stories", "Reels / Shorts", "Посты", "Обзоры / распаковки",
+    "Посещение заведений", "Мероприятия", "Амбассадорство", "Другое"
+]
+COOP_FORMATS = ["Оплата", "Бартер", "Оплата + бартер", "% с продаж", "Амбассадорство"]
 
 
 def business_intro_kb():
@@ -405,7 +463,7 @@ def owner_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🛡 Модерация"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="👥 База креаторов"), KeyboardButton(text="🏢 База бизнесов")],
+            [KeyboardButton(text="👥 Медиа-база"), KeyboardButton(text="🏢 База бизнесов")],
             [KeyboardButton(text="📋 Все заявки"), KeyboardButton(text="💬 Все отклики")],
             [KeyboardButton(text="📥 Выгрузить Excel"), KeyboardButton(text="📣 Рассылка")],
             [KeyboardButton(text="🔗 Рефералы"), KeyboardButton(text="👤 Режим пользователя")],
@@ -430,13 +488,28 @@ def moderation_kb(request_id: int):
 
 class CreatorForm(StatesGroup):
     name = State()
+    country = State()
+    country_other = State()
+    region = State()
     city = State()
-    creator_type = State()
+    work_format = State()
+    travel_scope = State()
     niche = State()
-    social_link = State()
-    followers = State()
-    reach = State()
+    blog1_platform = State()
+    blog1_link = State()
+    blog1_followers = State()
+    blog1_reach = State()
+    add_blog2 = State()
+    blog2_platform = State()
+    blog2_link = State()
+    blog2_followers = State()
+    blog2_reach = State()
+    ad_formats = State()
     cooperation_formats = State()
+    price_choice = State()
+    price = State()
+    excluded_topics = State()
+    brief_ready = State()
     contact = State()
 
 
@@ -479,16 +552,25 @@ def request_card(r) -> str:
 
 
 def creator_card(c) -> str:
+    second_blog = ""
+    if c.get("blog2_link") if hasattr(c, "get") else c["blog2_link"]:
+        second_blog = (
+            f"\nБлог 2: {c['blog2_platform'] or '—'} — {c['blog2_link']}\n"
+            f"Подписчики: {c['blog2_followers'] or '—'} · Охват: {c['blog2_reach'] or '—'}"
+        )
     return (
-        f"<b>Креатор</b>\n\n"
+        f"<b>Блогер</b>\n\n"
         f"Имя: {c['name']}\n"
-        f"Город: {c['city']}\n"
-        f"Тип: {c['creator_type']}\n"
-        f"Ниша: {c['niche']}\n"
-        f"Соцсети: {c['social_link']}\n"
-        f"Подписчики: {c['followers']}\n"
-        f"Охваты: {c['reach']}\n"
-        f"Форматы: {c['cooperation_formats']}"
+        f"География: {c['country'] or '—'}, {c['region'] or '—'}, {c['city'] or '—'}\n"
+        f"Формат работы: {c['work_format'] or '—'}\n"
+        f"Выезды: {c['travel_scope'] or '—'}\n"
+        f"Тематика: {c['niche'] or '—'}\n\n"
+        f"Блог 1: {c['social_link'] or '—'}\n"
+        f"Подписчики: {c['followers'] or '—'} · Охват: {c['reach'] or '—'}"
+        f"{second_blog}\n\n"
+        f"Рекламные форматы: {c['ad_formats'] or '—'}\n"
+        f"Сотрудничество: {c['cooperation_formats'] or '—'}\n"
+        f"Стоимость: {c['price'] or 'Обсуждается'}"
     )
 
 
@@ -638,76 +720,337 @@ async def business_contact(message: Message, state: FSMContext):
 async def role_creator_intro(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text(
-        "<b>Давайте создадим ваш профиль.</b>\n\n"
-        "Он понадобится, чтобы бизнес видел вас в откликах, а КЛИК мог показывать подходящие проекты.\n\n"
-        "Это займёт около 2 минут.",
+        "<b>Кто вы?</b>\n\n"
+        "<b>Блогер</b> — у вас есть собственная аудитория, и вы размещаете рекламу и интеграции в своих соцсетях.\n\n"
+        "<b>Контент-креатор</b> — вы создаёте фото и видео для брендов. Большая собственная аудитория необязательна.",
         reply_markup=creator_intro_kb()
     )
     await callback.answer()
 
 
-@router.callback_query(F.data == "creator_register")
+@router.callback_query(F.data == "creator_type_content")
+async def content_creator_soon(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text(
+        "<b>Контент-креаторы — следующий раздел КЛИК.</b>\n\n"
+        "Сейчас мы запускаем регистрацию блогеров. Анкету контент-креатора добавим отдельным сценарием.",
+        reply_markup=creator_intro_kb()
+    )
+
+
+@router.callback_query(F.data.in_({"creator_type_blogger", "creator_register"}))
 async def role_creator(callback: CallbackQuery, state: FSMContext):
     await state.clear()
+    await state.update_data(creator_type="Блогер")
     await state.set_state(CreatorForm.name)
-    await callback.message.edit_text("<b>Создаём профиль креатора</b>\n\nКак вас зовут?")
+    await callback.message.edit_text("<b>Создаём профиль блогера</b>\n\n1. Как вас зовут?")
     await callback.answer()
 
 
 @router.message(CreatorForm.name)
 async def creator_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text)
+    await state.update_data(name=message.text.strip())
+    await state.set_state(CreatorForm.country)
+    await message.answer(
+        "2. <b>Где вы находитесь?</b>",
+        reply_markup=single_choice_kb("blog_country", ["Россия", "Другая страна"])
+    )
+
+
+@router.callback_query(CreatorForm.country, F.data.startswith("blog_country:"))
+async def creator_country(callback: CallbackQuery, state: FSMContext):
+    idx = int(callback.data.split(":")[1])
+    choice = ["Россия", "Другая страна"][idx]
+    if choice == "Россия":
+        await state.update_data(country="Россия")
+        await state.set_state(CreatorForm.region)
+        await callback.message.edit_text("3. Укажите ваш регион:")
+    else:
+        await state.set_state(CreatorForm.country_other)
+        await callback.message.edit_text("3. Укажите страну:")
+    await callback.answer()
+
+
+@router.message(CreatorForm.country_other)
+async def creator_country_other(message: Message, state: FSMContext):
+    await state.update_data(country=message.text.strip())
+    await state.set_state(CreatorForm.region)
+    await message.answer("4. Укажите регион / область:")
+
+
+@router.message(CreatorForm.region)
+async def creator_region(message: Message, state: FSMContext):
+    await state.update_data(region=message.text.strip())
     await state.set_state(CreatorForm.city)
-    await message.answer("Ваш город / онлайн:")
+    await message.answer("Укажите город:")
 
 
 @router.message(CreatorForm.city)
 async def creator_city(message: Message, state: FSMContext):
-    await state.update_data(city=message.text)
-    await state.set_state(CreatorForm.creator_type)
-    await message.answer("Кто вы? Например: блогер, UGC-креатор, фотограф, видеограф, модель, эксперт")
+    await state.update_data(city=message.text.strip())
+    await state.set_state(CreatorForm.work_format)
+    await message.answer(
+        "5. <b>В каком формате вы готовы сотрудничать?</b>",
+        reply_markup=single_choice_kb("blog_work", ["Онлайн", "Оффлайн", "Онлайн + оффлайн"])
+    )
 
 
-@router.message(CreatorForm.creator_type)
-async def creator_type(message: Message, state: FSMContext):
-    await state.update_data(creator_type=message.text)
+@router.callback_query(CreatorForm.work_format, F.data.startswith("blog_work:"))
+async def creator_work_format(callback: CallbackQuery, state: FSMContext):
+    options = ["Онлайн", "Оффлайн", "Онлайн + оффлайн"]
+    choice = options[int(callback.data.split(":")[1])]
+    await state.update_data(work_format=choice)
+    if choice in {"Оффлайн", "Онлайн + оффлайн"}:
+        await state.set_state(CreatorForm.travel_scope)
+        await callback.message.edit_text(
+            "Куда вы готовы выезжать?",
+            reply_markup=single_choice_kb("blog_travel", ["Только мой город", "По региону", "По России"])
+        )
+    else:
+        await state.update_data(travel_scope="Не требуется")
+        await state.set_state(CreatorForm.niche)
+        await state.update_data(niche_selected=[])
+        await callback.message.edit_text(
+            "6. <b>Тематика вашего блога</b>\nМожно выбрать несколько вариантов.",
+            reply_markup=multi_choice_kb("blog_niche", BLOG_NICHES, [])
+        )
+    await callback.answer()
+
+
+@router.callback_query(CreatorForm.travel_scope, F.data.startswith("blog_travel:"))
+async def creator_travel(callback: CallbackQuery, state: FSMContext):
+    options = ["Только мой город", "По региону", "По России"]
+    choice = options[int(callback.data.split(":")[1])]
+    await state.update_data(travel_scope=choice, niche_selected=[])
     await state.set_state(CreatorForm.niche)
-    await message.answer("Ваша ниша: бьюти, еда, лайфстайл, бизнес, дети, спорт, другое")
+    await callback.message.edit_text(
+        "6. <b>Тематика вашего блога</b>\nМожно выбрать несколько вариантов.",
+        reply_markup=multi_choice_kb("blog_niche", BLOG_NICHES, [])
+    )
+    await callback.answer()
 
 
-@router.message(CreatorForm.niche)
-async def creator_niche(message: Message, state: FSMContext):
-    await state.update_data(niche=message.text)
-    await state.set_state(CreatorForm.social_link)
-    await message.answer("Ссылка на ваши соцсети / портфолио:")
+@router.callback_query(CreatorForm.niche, F.data.startswith("blog_niche:"))
+async def creator_niche(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("niche_selected", []))
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(niche=", ".join(selected))
+        await state.set_state(CreatorForm.blog1_platform)
+        await callback.message.edit_text(
+            "7. <b>Блог №1</b>\n\nВыберите площадку:",
+            reply_markup=single_choice_kb("blog1_platform", BLOG_PLATFORMS)
+        )
+        await callback.answer()
+        return
+    option = BLOG_NICHES[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(niche_selected=selected)
+    await callback.message.edit_reply_markup(reply_markup=multi_choice_kb("blog_niche", BLOG_NICHES, selected))
+    await callback.answer()
 
 
-@router.message(CreatorForm.social_link)
-async def creator_social(message: Message, state: FSMContext):
-    await state.update_data(social_link=message.text)
-    await state.set_state(CreatorForm.followers)
-    await message.answer("Количество подписчиков:")
+@router.callback_query(CreatorForm.blog1_platform, F.data.startswith("blog1_platform:"))
+async def creator_blog1_platform(callback: CallbackQuery, state: FSMContext):
+    platform = BLOG_PLATFORMS[int(callback.data.split(":")[1])]
+    await state.update_data(blog1_platform=platform)
+    await state.set_state(CreatorForm.blog1_link)
+    await callback.message.edit_text("Пришлите ссылку на блог №1:")
+    await callback.answer()
 
 
-@router.message(CreatorForm.followers)
-async def creator_followers(message: Message, state: FSMContext):
-    await state.update_data(followers=message.text)
-    await state.set_state(CreatorForm.reach)
-    await message.answer("Средние охваты / просмотры:")
+@router.message(CreatorForm.blog1_link)
+async def creator_blog1_link(message: Message, state: FSMContext):
+    await state.update_data(social_link=message.text.strip())
+    await state.set_state(CreatorForm.blog1_followers)
+    await message.answer("Количество подписчиков в блоге №1:")
 
 
-@router.message(CreatorForm.reach)
-async def creator_reach(message: Message, state: FSMContext):
-    await state.update_data(reach=message.text)
-    await state.set_state(CreatorForm.cooperation_formats)
-    await message.answer("Какие форматы рассматриваете? Оплата / бартер / процент / коллаборации")
+@router.message(CreatorForm.blog1_followers)
+async def creator_blog1_followers(message: Message, state: FSMContext):
+    await state.update_data(followers=message.text.strip())
+    await state.set_state(CreatorForm.blog1_reach)
+    await message.answer("Средний охват / просмотры блога №1:")
 
 
-@router.message(CreatorForm.cooperation_formats)
-async def creator_formats(message: Message, state: FSMContext):
-    await state.update_data(cooperation_formats=message.text)
+@router.message(CreatorForm.blog1_reach)
+async def creator_blog1_reach(message: Message, state: FSMContext):
+    await state.update_data(reach=message.text.strip())
+    await state.set_state(CreatorForm.add_blog2)
+    await message.answer(
+        "<b>Добавить второй блог?</b>",
+        reply_markup=single_choice_kb("blog2_add", ["Да", "Нет"])
+    )
+
+
+@router.callback_query(CreatorForm.add_blog2, F.data.startswith("blog2_add:"))
+async def creator_add_blog2(callback: CallbackQuery, state: FSMContext):
+    choice = ["Да", "Нет"][int(callback.data.split(":")[1])]
+    if choice == "Да":
+        await state.set_state(CreatorForm.blog2_platform)
+        await callback.message.edit_text(
+            "<b>Блог №2</b>\n\nВыберите площадку:",
+            reply_markup=single_choice_kb("blog2_platform", BLOG_PLATFORMS)
+        )
+    else:
+        await state.update_data(
+            blog2_platform=None, blog2_link=None, blog2_followers=None, blog2_reach=None,
+            ad_formats_selected=[]
+        )
+        await state.set_state(CreatorForm.ad_formats)
+        await callback.message.edit_text(
+            "8. <b>Какие рекламные форматы вы размещаете?</b>\nМожно выбрать несколько вариантов.",
+            reply_markup=multi_choice_kb("blog_ads", AD_FORMATS, [])
+        )
+    await callback.answer()
+
+
+@router.callback_query(CreatorForm.blog2_platform, F.data.startswith("blog2_platform:"))
+async def creator_blog2_platform(callback: CallbackQuery, state: FSMContext):
+    platform = BLOG_PLATFORMS[int(callback.data.split(":")[1])]
+    await state.update_data(blog2_platform=platform)
+    await state.set_state(CreatorForm.blog2_link)
+    await callback.message.edit_text("Пришлите ссылку на блог №2:")
+    await callback.answer()
+
+
+@router.message(CreatorForm.blog2_link)
+async def creator_blog2_link(message: Message, state: FSMContext):
+    await state.update_data(blog2_link=message.text.strip())
+    await state.set_state(CreatorForm.blog2_followers)
+    await message.answer("Количество подписчиков в блоге №2:")
+
+
+@router.message(CreatorForm.blog2_followers)
+async def creator_blog2_followers(message: Message, state: FSMContext):
+    await state.update_data(blog2_followers=message.text.strip())
+    await state.set_state(CreatorForm.blog2_reach)
+    await message.answer("Средний охват / просмотры блога №2:")
+
+
+@router.message(CreatorForm.blog2_reach)
+async def creator_blog2_reach(message: Message, state: FSMContext):
+    await state.update_data(blog2_reach=message.text.strip(), ad_formats_selected=[])
+    await state.set_state(CreatorForm.ad_formats)
+    await message.answer(
+        "8. <b>Какие рекламные форматы вы размещаете?</b>\nМожно выбрать несколько вариантов.",
+        reply_markup=multi_choice_kb("blog_ads", AD_FORMATS, [])
+    )
+
+
+@router.callback_query(CreatorForm.ad_formats, F.data.startswith("blog_ads:"))
+async def creator_ad_formats(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("ad_formats_selected", []))
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(ad_formats=", ".join(selected), coop_selected=[])
+        await state.set_state(CreatorForm.cooperation_formats)
+        await callback.message.edit_text(
+            "9. <b>Какие варианты сотрудничества рассматриваете?</b>\nМожно выбрать несколько вариантов.",
+            reply_markup=multi_choice_kb("blog_coop", COOP_FORMATS, [])
+        )
+        await callback.answer()
+        return
+    option = AD_FORMATS[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(ad_formats_selected=selected)
+    await callback.message.edit_reply_markup(reply_markup=multi_choice_kb("blog_ads", AD_FORMATS, selected))
+    await callback.answer()
+
+
+@router.callback_query(CreatorForm.cooperation_formats, F.data.startswith("blog_coop:"))
+async def creator_cooperation(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("coop_selected", []))
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(cooperation_formats=", ".join(selected))
+        await state.set_state(CreatorForm.price_choice)
+        await callback.message.edit_text(
+            "10. <b>Стоимость сотрудничества</b>",
+            reply_markup=single_choice_kb("blog_price", ["Указать стоимость", "Обсуждается"])
+        )
+        await callback.answer()
+        return
+    option = COOP_FORMATS[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(coop_selected=selected)
+    await callback.message.edit_reply_markup(reply_markup=multi_choice_kb("blog_coop", COOP_FORMATS, selected))
+    await callback.answer()
+
+
+@router.callback_query(CreatorForm.price_choice, F.data.startswith("blog_price:"))
+async def creator_price_choice(callback: CallbackQuery, state: FSMContext):
+    choice = ["Указать стоимость", "Обсуждается"][int(callback.data.split(":")[1])]
+    if choice == "Указать стоимость":
+        await state.set_state(CreatorForm.price)
+        await callback.message.edit_text("Укажите стоимость сотрудничества / стоимость от:")
+    else:
+        await state.update_data(price="Обсуждается")
+        await state.set_state(CreatorForm.excluded_topics)
+        await callback.message.edit_text(
+            "11. <b>С какими тематиками вы не работаете?</b>\n\n"
+            "Напишите ответ или нажмите «Пропустить».",
+            reply_markup=single_choice_kb("blog_excluded", ["Пропустить"])
+        )
+    await callback.answer()
+
+
+@router.message(CreatorForm.price)
+async def creator_price(message: Message, state: FSMContext):
+    await state.update_data(price=message.text.strip())
+    await state.set_state(CreatorForm.excluded_topics)
+    await message.answer(
+        "11. <b>С какими тематиками вы не работаете?</b>\n\n"
+        "Напишите ответ или нажмите «Пропустить».",
+        reply_markup=single_choice_kb("blog_excluded", ["Пропустить"])
+    )
+
+
+@router.callback_query(CreatorForm.excluded_topics, F.data.startswith("blog_excluded:"))
+async def creator_excluded_skip(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(excluded_topics="Не указано")
+    await state.set_state(CreatorForm.brief_ready)
+    await callback.message.edit_text(
+        "12. <b>Готовы ли вы создавать контент по ТЗ бренда?</b>",
+        reply_markup=single_choice_kb("blog_brief", ["Да", "Нет", "Зависит от проекта"])
+    )
+    await callback.answer()
+
+
+@router.message(CreatorForm.excluded_topics)
+async def creator_excluded(message: Message, state: FSMContext):
+    await state.update_data(excluded_topics=message.text.strip())
+    await state.set_state(CreatorForm.brief_ready)
+    await message.answer(
+        "12. <b>Готовы ли вы создавать контент по ТЗ бренда?</b>",
+        reply_markup=single_choice_kb("blog_brief", ["Да", "Нет", "Зависит от проекта"])
+    )
+
+
+@router.callback_query(CreatorForm.brief_ready, F.data.startswith("blog_brief:"))
+async def creator_brief(callback: CallbackQuery, state: FSMContext):
+    options = ["Да", "Нет", "Зависит от проекта"]
+    await state.update_data(brief_ready=options[int(callback.data.split(":")[1])])
     await state.set_state(CreatorForm.contact)
-    await message.answer("Контакт для связи:")
+    username = f"@{callback.from_user.username}" if callback.from_user.username else "не указан"
+    await callback.message.edit_text(
+        "13. <b>Контакт для связи</b>\n\n"
+        f"Ваш Telegram: {username}\n"
+        "Пришлите дополнительный контакт или напишите «Telegram»."
+    )
+    await callback.answer()
 
 
 @router.message(CreatorForm.contact)
@@ -718,31 +1061,35 @@ async def creator_contact(message: Message, state: FSMContext):
     conn.execute(
         """
         INSERT INTO creators
-        (user_id, name, city, creator_type, niche, social_link, followers, reach, cooperation_formats, contact, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        (user_id, name, country, region, city, creator_type, niche, work_format, travel_scope,
+         social_link, followers, reach, blog2_platform, blog2_link, blog2_followers, blog2_reach,
+         ad_formats, cooperation_formats, price, excluded_topics, brief_ready, contact, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT (user_id) DO UPDATE SET
-            name=excluded.name,
-            city=excluded.city,
-            creator_type=excluded.creator_type,
-            niche=excluded.niche,
-            social_link=excluded.social_link,
-            followers=excluded.followers,
-            reach=excluded.reach,
-            cooperation_formats=excluded.cooperation_formats,
-            contact=excluded.contact,
-            status='active'
+            name=excluded.name, country=excluded.country, region=excluded.region, city=excluded.city,
+            creator_type=excluded.creator_type, niche=excluded.niche, work_format=excluded.work_format,
+            travel_scope=excluded.travel_scope, social_link=excluded.social_link,
+            followers=excluded.followers, reach=excluded.reach,
+            blog2_platform=excluded.blog2_platform, blog2_link=excluded.blog2_link,
+            blog2_followers=excluded.blog2_followers, blog2_reach=excluded.blog2_reach,
+            ad_formats=excluded.ad_formats, cooperation_formats=excluded.cooperation_formats,
+            price=excluded.price, excluded_topics=excluded.excluded_topics,
+            brief_ready=excluded.brief_ready, contact=excluded.contact, status='active'
         """,
         (
-            message.from_user.id, data["name"], data["city"], data["creator_type"],
-            data["niche"], data["social_link"], data["followers"], data["reach"],
-            data["cooperation_formats"], message.text
+            message.from_user.id, data["name"], data.get("country"), data.get("region"), data.get("city"),
+            "Блогер", data.get("niche"), data.get("work_format"), data.get("travel_scope"),
+            data.get("social_link"), data.get("followers"), data.get("reach"),
+            data.get("blog2_platform"), data.get("blog2_link"), data.get("blog2_followers"), data.get("blog2_reach"),
+            data.get("ad_formats"), data.get("cooperation_formats"), data.get("price"),
+            data.get("excluded_topics"), data.get("brief_ready"), message.text.strip()
         )
     )
     conn.commit()
     conn.close()
     await state.clear()
     await message.answer(
-        "<b>Готово. Ваш профиль создан.</b>\n\n"
+        "<b>Готово. Профиль блогера создан.</b>\n\n"
         "Теперь можно смотреть актуальные проекты и откликаться на подходящие предложения.",
         reply_markup=creator_menu_kb()
     )
@@ -1260,7 +1607,7 @@ async def admin_stats(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.message(F.text == "👥 База креаторов")
+@router.message(F.text.in_({"👥 База креаторов", "👥 Медиа-база"}))
 async def owner_creators(message: Message):
     if not is_admin(message.from_user.id):
         return
@@ -1270,7 +1617,7 @@ async def owner_creators(message: Message):
     if not rows:
         await message.answer("Креаторов пока нет.", reply_markup=owner_reply_kb())
         return
-    await message.answer(f"<b>Креаторы — {len(rows)} последних</b>", reply_markup=owner_reply_kb())
+    await message.answer(f"<b>Медиа-база — {len(rows)} последних</b>", reply_markup=owner_reply_kb())
     for c in rows:
         await message.answer(creator_card(c) + "\n\n" + contact_line(c["user_id"], c["contact"]))
 
@@ -1383,7 +1730,7 @@ def export_excel_bytes() -> bytes:
     conn = db()
     datasets = {
         "Креаторы": conn.execute(
-            "SELECT user_id, name, city, creator_type, niche, social_link, followers, reach, cooperation_formats, contact, status FROM creators ORDER BY user_id"
+            "SELECT user_id, name, country, region, city, creator_type, niche, work_format, travel_scope, social_link, followers, reach, blog2_platform, blog2_link, blog2_followers, blog2_reach, ad_formats, cooperation_formats, price, excluded_topics, brief_ready, contact, status FROM creators ORDER BY user_id"
         ).fetchall(),
         "Бизнес": conn.execute(
             "SELECT user_id, business_name, city, niche, social_link, contact FROM business_profiles ORDER BY user_id"
