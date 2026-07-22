@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sqlite3
+from io import BytesIO
 from datetime import datetime
 from typing import Optional
 
@@ -10,17 +11,26 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
+import psycopg
+from psycopg.rows import dict_row
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+OWNER_ID_RAW = os.getenv("ADMIN_ID", "").strip()
 ADMIN_IDS = {
     int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
-DB_PATH = "collab_bot.db"
+if OWNER_ID_RAW.isdigit():
+    ADMIN_IDS.add(int(OWNER_ID_RAW))
+DB_PATH = os.getenv("DB_PATH", "collab_bot.db")
+USE_POSTGRES = bool(DATABASE_URL)
 
 router = Router()
 
@@ -29,120 +39,231 @@ router = Router()
 # Database
 # =========================
 
-def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+class DBConnection:
+    """Small compatibility wrapper: PostgreSQL on Railway, SQLite fallback for local tests."""
+
+    def __init__(self):
+        if USE_POSTGRES:
+            self.conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        else:
+            self.conn = sqlite3.connect(DB_PATH)
+            self.conn.row_factory = sqlite3.Row
+
+    def execute(self, sql: str, params=()):
+        if USE_POSTGRES:
+            sql = sql.replace("?", "%s")
+        return self.conn.execute(sql, params)
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
+
+def db() -> DBConnection:
+    return DBConnection()
 
 
 def init_db() -> None:
     conn = db()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            role TEXT,
-            created_at TEXT
+    if USE_POSTGRES:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                role TEXT,
+                created_at TEXT
+            )
+            """
         )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS creators (
-            user_id INTEGER PRIMARY KEY,
-            name TEXT,
-            city TEXT,
-            creator_type TEXT,
-            niche TEXT,
-            social_link TEXT,
-            followers TEXT,
-            reach TEXT,
-            cooperation_formats TEXT,
-            contact TEXT,
-            status TEXT DEFAULT 'active',
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS creators (
+                user_id BIGINT PRIMARY KEY,
+                name TEXT,
+                city TEXT,
+                creator_type TEXT,
+                niche TEXT,
+                social_link TEXT,
+                followers TEXT,
+                reach TEXT,
+                cooperation_formats TEXT,
+                contact TEXT,
+                status TEXT DEFAULT 'active',
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+            """
         )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS business_profiles (
-            user_id INTEGER PRIMARY KEY,
-            business_name TEXT,
-            city TEXT,
-            niche TEXT,
-            social_link TEXT,
-            contact TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS business_profiles (
+                user_id BIGINT PRIMARY KEY,
+                business_name TEXT,
+                city TEXT,
+                niche TEXT,
+                social_link TEXT,
+                contact TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+            """
         )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS requests (
-            request_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            business_user_id INTEGER,
-            business_name TEXT,
-            city TEXT,
-            niche TEXT,
-            task TEXT,
-            creator_needed TEXT,
-            cooperation_format TEXT,
-            budget TEXT,
-            social_link TEXT,
-            contact TEXT,
-            status TEXT DEFAULT 'active',
-            created_at TEXT,
-            FOREIGN KEY(business_user_id) REFERENCES users(user_id)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS requests (
+                request_id BIGSERIAL PRIMARY KEY,
+                business_user_id BIGINT,
+                business_name TEXT,
+                city TEXT,
+                niche TEXT,
+                task TEXT,
+                creator_needed TEXT,
+                cooperation_format TEXT,
+                budget TEXT,
+                social_link TEXT,
+                contact TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT,
+                moderated_at TEXT,
+                moderated_by BIGINT,
+                FOREIGN KEY(business_user_id) REFERENCES users(user_id)
+            )
+            """
         )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS responses (
-            response_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request_id INTEGER,
-            creator_user_id INTEGER,
-            business_user_id INTEGER,
-            status TEXT DEFAULT 'new',
-            created_at TEXT,
-            UNIQUE(request_id, creator_user_id),
-            FOREIGN KEY(request_id) REFERENCES requests(request_id),
-            FOREIGN KEY(creator_user_id) REFERENCES users(user_id),
-            FOREIGN KEY(business_user_id) REFERENCES users(user_id)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS responses (
+                response_id BIGSERIAL PRIMARY KEY,
+                request_id BIGINT,
+                creator_user_id BIGINT,
+                business_user_id BIGINT,
+                status TEXT DEFAULT 'new',
+                created_at TEXT,
+                UNIQUE(request_id, creator_user_id),
+                FOREIGN KEY(request_id) REFERENCES requests(request_id),
+                FOREIGN KEY(creator_user_id) REFERENCES users(user_id),
+                FOREIGN KEY(business_user_id) REFERENCES users(user_id)
+            )
+            """
         )
-        """
-    )
-
+        # Safe migrations for databases created by an older release.
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_at TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
+    else:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                role TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS creators (
+                user_id INTEGER PRIMARY KEY,
+                name TEXT,
+                city TEXT,
+                creator_type TEXT,
+                niche TEXT,
+                social_link TEXT,
+                followers TEXT,
+                reach TEXT,
+                cooperation_formats TEXT,
+                contact TEXT,
+                status TEXT DEFAULT 'active'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS business_profiles (
+                user_id INTEGER PRIMARY KEY,
+                business_name TEXT,
+                city TEXT,
+                niche TEXT,
+                social_link TEXT,
+                contact TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS requests (
+                request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                business_user_id INTEGER,
+                business_name TEXT,
+                city TEXT,
+                niche TEXT,
+                task TEXT,
+                creator_needed TEXT,
+                cooperation_format TEXT,
+                budget TEXT,
+                social_link TEXT,
+                contact TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT,
+                moderated_at TEXT,
+                moderated_by INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS responses (
+                response_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id INTEGER,
+                creator_user_id INTEGER,
+                business_user_id INTEGER,
+                status TEXT DEFAULT 'new',
+                created_at TEXT,
+                UNIQUE(request_id, creator_user_id)
+            )
+            """
+        )
+        # SQLite migrations for an existing local DB.
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()}
+        if "moderated_at" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN moderated_at TEXT")
+        if "moderated_by" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN moderated_by INTEGER")
     conn.commit()
     conn.close()
 
 
 def upsert_user(message: Message, role: Optional[str] = None) -> None:
     conn = db()
-    cur = conn.cursor()
-    existing = cur.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
+    existing = conn.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
     if existing:
         if role:
-            cur.execute("UPDATE users SET role=?, username=?, full_name=? WHERE user_id=?", (
-                role, message.from_user.username, message.from_user.full_name, message.from_user.id
-            ))
+            conn.execute(
+                "UPDATE users SET role=?, username=?, full_name=? WHERE user_id=?",
+                (role, message.from_user.username, message.from_user.full_name, message.from_user.id),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET username=?, full_name=? WHERE user_id=?",
+                (message.from_user.username, message.from_user.full_name, message.from_user.id),
+            )
     else:
-        cur.execute(
+        conn.execute(
             "INSERT INTO users(user_id, username, full_name, role, created_at) VALUES (?, ?, ?, ?, ?)",
-            (message.from_user.id, message.from_user.username, message.from_user.full_name, role, datetime.now().isoformat())
+            (message.from_user.id, message.from_user.username, message.from_user.full_name, role, datetime.now().isoformat()),
         )
     conn.commit()
     conn.close()
 
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 # =========================
 # Keyboards
@@ -217,9 +338,34 @@ def business_decision_kb(response_id: int):
 
 def admin_kb():
     kb = InlineKeyboardBuilder()
+    kb.button(text="Заявки на модерацию", callback_data="admin_moderation")
     kb.button(text="Статистика", callback_data="admin_stats")
-    kb.button(text="Активные заявки", callback_data="admin_requests")
+    kb.button(text="Все заявки", callback_data="admin_requests")
+    kb.button(text="Выгрузить Excel", callback_data="admin_export")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def owner_reply_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🛡 Модерация"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="👥 База креаторов"), KeyboardButton(text="🏢 База бизнесов")],
+            [KeyboardButton(text="📋 Все заявки"), KeyboardButton(text="💬 Все отклики")],
+            [KeyboardButton(text="📥 Выгрузить Excel"), KeyboardButton(text="📣 Рассылка")],
+            [KeyboardButton(text="👤 Режим пользователя")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Панель владельца КЛИК",
+    )
+
+
+def moderation_kb(request_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Одобрить", callback_data=f"moderate_approve:{request_id}")
+    kb.button(text="❌ Отклонить", callback_data=f"moderate_reject:{request_id}")
+    kb.adjust(2)
     return kb.as_markup()
 
 
@@ -245,6 +391,10 @@ class BusinessForm(StatesGroup):
     niche = State()
     social_link = State()
     contact = State()
+
+
+class BroadcastForm(StatesGroup):
+    text = State()
 
 
 class RequestForm(StatesGroup):
@@ -303,6 +453,14 @@ def contact_line(user_id: int, contact: str) -> str:
 async def start(message: Message, state: FSMContext):
     await state.clear()
     upsert_user(message)
+    if is_admin(message.from_user.id):
+        await message.answer(
+            "<b>КЛИК | Панель владельца</b>\n\n"
+            "Здесь закреплены модерация, базы, статистика и выгрузка Excel.\n"
+            "Для проверки пользовательского сценария нажмите «👤 Режим пользователя».",
+            reply_markup=owner_reply_kb(),
+        )
+        return
     await message.answer(
         "<b>КЛИК | Медиа-маркет</b>\n\n"
         "Платформа, где <b>бизнес находит креаторов</b>, а <b>креаторы — проекты, рекламу и коллаборации</b>.\n\n"
@@ -310,6 +468,11 @@ async def start(message: Message, state: FSMContext):
         "Выберите, кто вы:",
         reply_markup=main_menu_kb()
     )
+
+
+@router.message(Command("myid"))
+async def my_id(message: Message):
+    await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
 
 
 @router.callback_query(F.data == "main_menu")
@@ -392,9 +555,15 @@ async def business_contact(message: Message, state: FSMContext):
     conn = db()
     conn.execute(
         """
-        INSERT OR REPLACE INTO business_profiles
+        INSERT INTO business_profiles
         (user_id, business_name, city, niche, social_link, contact)
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (user_id) DO UPDATE SET
+            business_name=excluded.business_name,
+            city=excluded.city,
+            niche=excluded.niche,
+            social_link=excluded.social_link,
+            contact=excluded.contact
         """,
         (message.from_user.id, data["business_name"], data["city"], data["niche"], data["social_link"], message.text)
     )
@@ -493,9 +662,20 @@ async def creator_contact(message: Message, state: FSMContext):
     conn = db()
     conn.execute(
         """
-        INSERT OR REPLACE INTO creators
+        INSERT INTO creators
         (user_id, name, city, creator_type, niche, social_link, followers, reach, cooperation_formats, contact, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        ON CONFLICT (user_id) DO UPDATE SET
+            name=excluded.name,
+            city=excluded.city,
+            creator_type=excluded.creator_type,
+            niche=excluded.niche,
+            social_link=excluded.social_link,
+            followers=excluded.followers,
+            reach=excluded.reach,
+            cooperation_formats=excluded.cooperation_formats,
+            contact=excluded.contact,
+            status='active'
         """,
         (
             message.from_user.id, data["name"], data["city"], data["creator_type"],
@@ -555,35 +735,37 @@ async def req_budget(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     conn = db()
     profile = conn.execute("SELECT * FROM business_profiles WHERE user_id=?", (message.from_user.id,)).fetchone()
-    cur = conn.cursor()
-    cur.execute(
+    row = conn.execute(
         """
         INSERT INTO requests
         (business_user_id, business_name, city, niche, task, creator_needed, cooperation_format, budget, social_link, contact, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        RETURNING request_id
         """,
         (
             message.from_user.id, profile["business_name"], profile["city"], profile["niche"],
             data["task"], data["creator_needed"], data["cooperation_format"], message.text,
             profile["social_link"], profile["contact"], datetime.now().isoformat()
         )
-    )
-    request_id = cur.lastrowid
+    ).fetchone()
+    request_id = row["request_id"]
     request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
-    creators = conn.execute("SELECT * FROM creators WHERE status='active'").fetchall()
     conn.commit()
     conn.close()
 
     await state.clear()
-    await message.answer("Заявка создана. Креаторы смогут откликнуться.", reply_markup=business_menu_kb())
+    await message.answer(
+        "<b>Заявка отправлена на модерацию.</b>\n\n"
+        "После одобрения она появится у креаторов.",
+        reply_markup=business_menu_kb(),
+    )
 
-    # MVP: отправляем всем активным креаторам. Позже можно включить фильтры по городу/нише/формату.
-    for creator in creators:
+    for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(
-                creator["user_id"],
-                "<b>Новая заявка для вас</b>\n\n" + request_card(request),
-                reply_markup=request_kb(request_id)
+                admin_id,
+                "<b>Новая заявка на модерацию</b>\n\n" + request_card(request),
+                reply_markup=moderation_kb(request_id),
             )
         except Exception:
             pass
@@ -623,14 +805,13 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
         return
 
     try:
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO responses(request_id, creator_user_id, business_user_id, status, created_at) VALUES (?, ?, ?, 'new', ?)",
+        row = conn.execute(
+            "INSERT INTO responses(request_id, creator_user_id, business_user_id, status, created_at) VALUES (?, ?, ?, 'new', ?) RETURNING response_id",
             (request_id, callback.from_user.id, request["business_user_id"], datetime.now().isoformat())
-        )
-        response_id = cur.lastrowid
+        ).fetchone()
+        response_id = row["response_id"]
         conn.commit()
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError):
         conn.close()
         await callback.answer("Вы уже откликались на эту заявку", show_alert=True)
         return
@@ -835,56 +1016,373 @@ async def help_section(callback: CallbackQuery):
     )
     await callback.answer()
 
-# ---------- Admin ----------
+# ---------- Owner / Admin ----------
+
+async def send_pending_requests(message: Message):
+    conn = db()
+    rows = conn.execute("SELECT * FROM requests WHERE status='pending' ORDER BY request_id ASC LIMIT 20").fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("На модерации сейчас ничего нет.", reply_markup=owner_reply_kb())
+        return
+    await message.answer(f"<b>На модерации: {len(rows)}</b>", reply_markup=owner_reply_kb())
+    for r in rows:
+        await message.answer(request_card(r), reply_markup=moderation_kb(r["request_id"]))
+
+
+async def broadcast_approved_request(bot: Bot, request_id: int):
+    conn = db()
+    request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
+    creators = conn.execute("SELECT * FROM creators WHERE status='active'").fetchall()
+    conn.close()
+    if not request or request["status"] != "active":
+        return
+    for creator in creators:
+        try:
+            await bot.send_message(
+                creator["user_id"],
+                "<b>Новая заявка</b>\n\n" + request_card(request),
+                reply_markup=request_kb(request_id),
+            )
+        except Exception:
+            pass
+
 
 @router.message(Command("admin"))
 async def admin(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         await message.answer("Нет доступа.")
         return
-    await message.answer("Админ-панель:", reply_markup=admin_kb())
+    await message.answer("<b>Панель владельца КЛИК</b>", reply_markup=owner_reply_kb())
 
 
-@router.callback_query(F.data == "admin_stats")
-async def admin_stats(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+@router.message(F.text == "🛡 Модерация")
+async def owner_moderation_message(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    await send_pending_requests(message)
+
+
+@router.callback_query(F.data == "admin_moderation")
+async def owner_moderation_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+    await send_pending_requests(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("moderate_approve:"))
+async def moderate_approve(callback: CallbackQuery, bot: Bot):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":")[1])
+    conn = db()
+    request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
+    if not request or request["status"] != "pending":
+        conn.close()
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
+    conn.execute(
+        "UPDATE requests SET status='active', moderated_at=?, moderated_by=? WHERE request_id=?",
+        (datetime.now().isoformat(), callback.from_user.id, request_id),
+    )
+    conn.commit()
+    conn.close()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(f"✅ Заявка #{request_id} одобрена и опубликована.")
+    try:
+        await bot.send_message(
+            request["business_user_id"],
+            f"✅ Ваша заявка #{request_id} прошла модерацию и опубликована.",
+            reply_markup=business_menu_kb(),
+        )
+    except Exception:
+        pass
+    await broadcast_approved_request(bot, request_id)
+    await callback.answer("Опубликовано")
+
+
+@router.callback_query(F.data.startswith("moderate_reject:"))
+async def moderate_reject(callback: CallbackQuery, bot: Bot):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":")[1])
+    conn = db()
+    request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
+    if not request or request["status"] != "pending":
+        conn.close()
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
+    conn.execute(
+        "UPDATE requests SET status='rejected', moderated_at=?, moderated_by=? WHERE request_id=?",
+        (datetime.now().isoformat(), callback.from_user.id, request_id),
+    )
+    conn.commit()
+    conn.close()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(f"❌ Заявка #{request_id} отклонена.")
+    try:
+        await bot.send_message(
+            request["business_user_id"],
+            f"Заявка #{request_id} не прошла модерацию. Проверьте формулировку и создайте новую заявку.",
+            reply_markup=business_menu_kb(),
+        )
+    except Exception:
+        pass
+    await callback.answer("Отклонено")
+
+
+async def stats_text() -> str:
     conn = db()
     users = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
     creators = conn.execute("SELECT COUNT(*) AS c FROM creators").fetchone()["c"]
     businesses = conn.execute("SELECT COUNT(*) AS c FROM business_profiles").fetchone()["c"]
     requests = conn.execute("SELECT COUNT(*) AS c FROM requests").fetchone()["c"]
+    pending = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE status='pending'").fetchone()["c"]
+    active = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE status='active'").fetchone()["c"]
     responses = conn.execute("SELECT COUNT(*) AS c FROM responses").fetchone()["c"]
+    accepted = conn.execute("SELECT COUNT(*) AS c FROM responses WHERE status='accepted'").fetchone()["c"]
     conn.close()
-    await callback.message.edit_text(
-        f"Статистика:\n\nПользователи: {users}\nКреаторы: {creators}\nБизнесы: {businesses}\nЗаявки: {requests}\nОтклики: {responses}",
-        reply_markup=admin_kb()
+    return (
+        "<b>Статистика КЛИК</b>\n\n"
+        f"Пользователи: {users}\n"
+        f"Креаторы: {creators}\n"
+        f"Бизнесы: {businesses}\n\n"
+        f"Заявки: {requests}\n"
+        f"На модерации: {pending}\n"
+        f"Активные: {active}\n\n"
+        f"Отклики: {responses}\n"
+        f"Приняты: {accepted}"
     )
+
+
+@router.message(F.text == "📊 Статистика")
+async def owner_stats_message(message: Message):
+    if is_admin(message.from_user.id):
+        await message.answer(await stats_text(), reply_markup=owner_reply_kb())
+
+
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.answer(await stats_text(), reply_markup=owner_reply_kb())
     await callback.answer()
+
+
+@router.message(F.text == "👥 База креаторов")
+async def owner_creators(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    conn = db()
+    rows = conn.execute("SELECT * FROM creators ORDER BY user_id DESC LIMIT 30").fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("Креаторов пока нет.", reply_markup=owner_reply_kb())
+        return
+    await message.answer(f"<b>Креаторы — {len(rows)} последних</b>", reply_markup=owner_reply_kb())
+    for c in rows:
+        await message.answer(creator_card(c) + "\n\n" + contact_line(c["user_id"], c["contact"]))
+
+
+@router.message(F.text == "🏢 База бизнесов")
+async def owner_businesses(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    conn = db()
+    rows = conn.execute("SELECT * FROM business_profiles ORDER BY user_id DESC LIMIT 30").fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("Бизнесов пока нет.", reply_markup=owner_reply_kb())
+        return
+    await message.answer(f"<b>Бизнесы — {len(rows)} последних</b>", reply_markup=owner_reply_kb())
+    for p in rows:
+        await message.answer(
+            f"<b>{p['business_name']}</b>\n"
+            f"Город: {p['city']}\nНиша: {p['niche']}\nСоцсети: {p['social_link']}\n"
+            + contact_line(p["user_id"], p["contact"])
+        )
+
+
+@router.message(F.text == "📋 Все заявки")
+async def owner_requests(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    conn = db()
+    rows = conn.execute("SELECT * FROM requests ORDER BY request_id DESC LIMIT 30").fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("Заявок пока нет.", reply_markup=owner_reply_kb())
+        return
+    await message.answer(f"<b>Последние заявки: {len(rows)}</b>", reply_markup=owner_reply_kb())
+    for r in rows:
+        await message.answer(request_card(r), reply_markup=moderation_kb(r["request_id"]) if r["status"] == "pending" else None)
 
 
 @router.callback_query(F.data == "admin_requests")
 async def admin_requests(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+    await owner_requests(callback.message)
+    await callback.answer()
+
+
+@router.message(F.text == "💬 Все отклики")
+async def owner_responses(message: Message):
+    if not is_admin(message.from_user.id):
+        return
     conn = db()
-    rows = conn.execute("SELECT * FROM requests ORDER BY request_id DESC LIMIT 10").fetchall()
+    rows = conn.execute(
+        """
+        SELECT responses.*, creators.name, requests.business_name, requests.task
+        FROM responses
+        JOIN creators ON creators.user_id=responses.creator_user_id
+        JOIN requests ON requests.request_id=responses.request_id
+        ORDER BY responses.response_id DESC LIMIT 30
+        """
+    ).fetchall()
     conn.close()
     if not rows:
-        await callback.message.edit_text("Заявок нет.", reply_markup=admin_kb())
-        await callback.answer()
+        await message.answer("Откликов пока нет.", reply_markup=owner_reply_kb())
         return
-    await callback.message.edit_text("Последние заявки:")
+    await message.answer(f"<b>Последние отклики: {len(rows)}</b>", reply_markup=owner_reply_kb())
     for r in rows:
-        await callback.message.answer(request_card(r))
+        await message.answer(
+            f"#{r['response_id']} · {r['status']}\n"
+            f"Бизнес: {r['business_name']}\nКреатор: {r['name']}\nЗадача: {r['task']}"
+        )
+
+
+def export_excel_bytes() -> bytes:
+    conn = db()
+    datasets = {
+        "Креаторы": conn.execute(
+            "SELECT user_id, name, city, creator_type, niche, social_link, followers, reach, cooperation_formats, contact, status FROM creators ORDER BY user_id"
+        ).fetchall(),
+        "Бизнес": conn.execute(
+            "SELECT user_id, business_name, city, niche, social_link, contact FROM business_profiles ORDER BY user_id"
+        ).fetchall(),
+        "Заявки": conn.execute(
+            "SELECT request_id, business_user_id, business_name, city, niche, creator_needed, task, cooperation_format, budget, social_link, contact, status, created_at FROM requests ORDER BY request_id"
+        ).fetchall(),
+        "Отклики": conn.execute(
+            "SELECT response_id, request_id, creator_user_id, business_user_id, status, created_at FROM responses ORDER BY response_id"
+        ).fetchall(),
+    }
+    conn.close()
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for title, rows in datasets.items():
+        ws = wb.create_sheet(title)
+        if not rows:
+            ws.append(["Нет данных"])
+            continue
+        headers = list(rows[0].keys())
+        ws.append(headers)
+        for row in rows:
+            ws.append([row[h] for h in headers])
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="111827")
+            cell.alignment = Alignment(horizontal="center")
+        ws.freeze_panes = "A2"
+        for column_cells in ws.columns:
+            width = min(max(len(str(c.value or "")) for c in column_cells) + 2, 42)
+            ws.column_dimensions[column_cells[0].column_letter].width = max(width, 12)
+
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+@router.message(F.text == "📥 Выгрузить Excel")
+async def owner_export_message(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    data = export_excel_bytes()
+    filename = f"KLIK_base_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
+    await message.answer_document(BufferedInputFile(data, filename=filename), caption="Актуальная база КЛИК")
+
+
+@router.callback_query(F.data == "admin_export")
+async def owner_export_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    data = export_excel_bytes()
+    filename = f"KLIK_base_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
+    await callback.message.answer_document(BufferedInputFile(data, filename=filename), caption="Актуальная база КЛИК")
     await callback.answer()
+
+
+@router.message(F.text == "📣 Рассылка")
+async def owner_broadcast_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.set_state(BroadcastForm.text)
+    await message.answer(
+        "Пришлите текст рассылки одним сообщением. Он уйдёт всем зарегистрированным пользователям.\n\n"
+        "Для отмены отправьте /cancel."
+    )
+
+
+@router.message(Command("cancel"))
+async def cancel_action(message: Message, state: FSMContext):
+    await state.clear()
+    if is_admin(message.from_user.id):
+        await message.answer("Действие отменено.", reply_markup=owner_reply_kb())
+    else:
+        await message.answer("Действие отменено.")
+
+
+@router.message(BroadcastForm.text)
+async def owner_broadcast_send(message: Message, state: FSMContext, bot: Bot):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    text = message.html_text or message.text or ""
+    conn = db()
+    users = conn.execute("SELECT user_id FROM users ORDER BY user_id").fetchall()
+    conn.close()
+    sent = 0
+    failed = 0
+    for row in users:
+        try:
+            await bot.send_message(row["user_id"], text)
+            sent += 1
+        except Exception:
+            failed += 1
+    await state.clear()
+    await message.answer(
+        f"Рассылка завершена.\n\nОтправлено: {sent}\nНе доставлено: {failed}",
+        reply_markup=owner_reply_kb(),
+    )
+
+
+@router.message(F.text == "👤 Режим пользователя")
+async def owner_user_mode(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(
+        "<b>Тестовый режим пользователя</b>\n\nВыберите роль, которую хотите проверить:",
+        reply_markup=main_menu_kb(),
+    )
 
 
 async def main():
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing. Add it to .env")
+        raise RuntimeError("BOT_TOKEN is missing. Add it to Railway Variables")
+    if not ADMIN_IDS:
+        print("WARNING: ADMIN_ID/ADMIN_IDS is not configured; owner panel will be unavailable.")
+    if not USE_POSTGRES:
+        print("WARNING: DATABASE_URL is missing. SQLite fallback is NOT persistent on Railway redeploys.")
     init_db()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
