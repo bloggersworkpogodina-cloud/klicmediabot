@@ -78,7 +78,9 @@ def init_db() -> None:
                 username TEXT,
                 full_name TEXT,
                 role TEXT,
-                created_at TEXT
+                created_at TEXT,
+                referred_by BIGINT,
+                referral_created_at TEXT
             )
             """
         )
@@ -154,6 +156,8 @@ def init_db() -> None:
         # Safe migrations for databases created by an older release.
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_at TEXT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_created_at TEXT")
     else:
         conn.execute(
             """
@@ -162,7 +166,9 @@ def init_db() -> None:
                 username TEXT,
                 full_name TEXT,
                 role TEXT,
-                created_at TEXT
+                created_at TEXT,
+                referred_by INTEGER,
+                referral_created_at TEXT
             )
             """
         )
@@ -235,11 +241,17 @@ def init_db() -> None:
             conn.execute("ALTER TABLE requests ADD COLUMN moderated_at TEXT")
         if "moderated_by" not in columns:
             conn.execute("ALTER TABLE requests ADD COLUMN moderated_by INTEGER")
+        user_columns = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "referred_by" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        if "referral_created_at" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN referral_created_at TEXT")
     conn.commit()
     conn.close()
 
 
-def upsert_user(message: Message, role: Optional[str] = None) -> None:
+def upsert_user(message: Message, role: Optional[str] = None, referred_by: Optional[int] = None) -> None:
+    """Create/update a user. Referral source is written only on the first visit."""
     conn = db()
     existing = conn.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
     if existing:
@@ -254,12 +266,53 @@ def upsert_user(message: Message, role: Optional[str] = None) -> None:
                 (message.from_user.username, message.from_user.full_name, message.from_user.id),
             )
     else:
+        valid_referrer = None
+        if referred_by and referred_by != message.from_user.id:
+            inviter = conn.execute("SELECT user_id FROM users WHERE user_id=?", (referred_by,)).fetchone()
+            if inviter:
+                valid_referrer = referred_by
         conn.execute(
-            "INSERT INTO users(user_id, username, full_name, role, created_at) VALUES (?, ?, ?, ?, ?)",
-            (message.from_user.id, message.from_user.username, message.from_user.full_name, role, datetime.now().isoformat()),
+            """INSERT INTO users
+            (user_id, username, full_name, role, created_at, referred_by, referral_created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                message.from_user.id,
+                message.from_user.username,
+                message.from_user.full_name,
+                role,
+                datetime.now().isoformat(),
+                valid_referrer,
+                datetime.now().isoformat() if valid_referrer else None,
+            ),
         )
     conn.commit()
     conn.close()
+
+
+def parse_referrer(message: Message) -> Optional[int]:
+    """Read deep-link payload /start ref_<telegram_id>."""
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) != 2:
+        return None
+    payload = parts[1].strip()
+    if not payload.startswith("ref_"):
+        return None
+    value = payload[4:]
+    return int(value) if value.isdigit() else None
+
+
+def referral_counts(user_id: int) -> dict:
+    conn = db()
+    total = conn.execute("SELECT COUNT(*) AS c FROM users WHERE referred_by=?", (user_id,)).fetchone()["c"]
+    creators = conn.execute(
+        "SELECT COUNT(*) AS c FROM users WHERE referred_by=? AND role='creator'", (user_id,)
+    ).fetchone()["c"]
+    businesses = conn.execute(
+        "SELECT COUNT(*) AS c FROM users WHERE referred_by=? AND role='business'", (user_id,)
+    ).fetchone()["c"]
+    conn.close()
+    return {"total": total, "creators": creators, "businesses": businesses}
 
 
 def is_admin(user_id: int) -> bool:
@@ -306,6 +359,7 @@ def business_menu_kb():
     kb.button(text="Мои заявки", callback_data="business_my_requests")
     kb.button(text="Отклики креаторов", callback_data="business_responses")
     kb.button(text="Мой профиль", callback_data="business_profile")
+    kb.button(text="Пригласить", callback_data="my_referral")
     kb.button(text="Помощь", callback_data="help_business")
     kb.adjust(1)
     return kb.as_markup()
@@ -316,6 +370,7 @@ def creator_menu_kb():
     kb.button(text="Проекты", callback_data="creator_view_requests")
     kb.button(text="Мои отклики", callback_data="creator_my_responses")
     kb.button(text="Мой профиль", callback_data="creator_profile")
+    kb.button(text="Пригласить", callback_data="my_referral")
     kb.button(text="Настройки", callback_data="creator_settings")
     kb.button(text="Помощь", callback_data="help_creator")
     kb.adjust(1)
@@ -353,7 +408,7 @@ def owner_reply_kb():
             [KeyboardButton(text="👥 База креаторов"), KeyboardButton(text="🏢 База бизнесов")],
             [KeyboardButton(text="📋 Все заявки"), KeyboardButton(text="💬 Все отклики")],
             [KeyboardButton(text="📥 Выгрузить Excel"), KeyboardButton(text="📣 Рассылка")],
-            [KeyboardButton(text="👤 Режим пользователя")],
+            [KeyboardButton(text="🔗 Рефералы"), KeyboardButton(text="👤 Режим пользователя")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -452,7 +507,7 @@ def contact_line(user_id: int, contact: str) -> str:
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
-    upsert_user(message)
+    upsert_user(message, referred_by=parse_referrer(message))
     if is_admin(message.from_user.id):
         await message.answer(
             "<b>КЛИК | Панель владельца</b>\n\n"
@@ -962,6 +1017,33 @@ async def creator_my_responses(callback: CallbackQuery):
     await callback.answer()
 
 
+# ---------- Referrals ----------
+
+@router.callback_query(F.data == "my_referral")
+async def my_referral(callback: CallbackQuery, bot: Bot):
+    me = await bot.get_me()
+    counts = referral_counts(callback.from_user.id)
+    link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
+
+    conn = db()
+    user = conn.execute("SELECT role FROM users WHERE user_id=?", (callback.from_user.id,)).fetchone()
+    conn.close()
+    role = user["role"] if user else None
+    menu = business_menu_kb() if role == "business" else creator_menu_kb()
+
+    await callback.message.edit_text(
+        "<b>Пригласить в КЛИК</b>\n\n"
+        "Отправьте свою персональную ссылку друзьям, коллегам, блогерам и бизнесам. "
+        "Мы сохраним, кого вы пригласили.\n\n"
+        f"<b>Ваша ссылка:</b>\n<code>{link}</code>\n\n"
+        f"Приглашено: <b>{counts['total']}</b>\n"
+        f"Креаторов: <b>{counts['creators']}</b>\n"
+        f"Бизнесов: <b>{counts['businesses']}</b>",
+        reply_markup=menu,
+    )
+    await callback.answer()
+
+
 # ---------- Profiles / help ----------
 
 @router.callback_query(F.data == "business_profile")
@@ -1145,6 +1227,8 @@ async def stats_text() -> str:
     active = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE status='active'").fetchone()["c"]
     responses = conn.execute("SELECT COUNT(*) AS c FROM responses").fetchone()["c"]
     accepted = conn.execute("SELECT COUNT(*) AS c FROM responses WHERE status='accepted'").fetchone()["c"]
+    referred = conn.execute("SELECT COUNT(*) AS c FROM users WHERE referred_by IS NOT NULL").fetchone()["c"]
+    referrers = conn.execute("SELECT COUNT(DISTINCT referred_by) AS c FROM users WHERE referred_by IS NOT NULL").fetchone()["c"]
     conn.close()
     return (
         "<b>Статистика КЛИК</b>\n\n"
@@ -1155,7 +1239,9 @@ async def stats_text() -> str:
         f"На модерации: {pending}\n"
         f"Активные: {active}\n\n"
         f"Отклики: {responses}\n"
-        f"Приняты: {accepted}"
+        f"Приняты: {accepted}\n\n"
+        f"Пришли по рефералам: {referred}\n"
+        f"Приглашают пользователей: {referrers}"
     )
 
 
@@ -1258,6 +1344,41 @@ async def owner_responses(message: Message):
         )
 
 
+@router.message(F.text == "🔗 Рефералы")
+async def owner_referrals(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT
+            inviter.user_id AS inviter_id,
+            inviter.full_name AS inviter_name,
+            inviter.username AS inviter_username,
+            COUNT(invited.user_id) AS total,
+            SUM(CASE WHEN invited.role='creator' THEN 1 ELSE 0 END) AS creators,
+            SUM(CASE WHEN invited.role='business' THEN 1 ELSE 0 END) AS businesses
+        FROM users inviter
+        JOIN users invited ON invited.referred_by = inviter.user_id
+        GROUP BY inviter.user_id, inviter.full_name, inviter.username
+        ORDER BY total DESC
+        LIMIT 30
+        """
+    ).fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("Рефералов пока нет.", reply_markup=owner_reply_kb())
+        return
+    await message.answer("<b>Реферальная статистика</b>", reply_markup=owner_reply_kb())
+    for r in rows:
+        username = f"@{r['inviter_username']}" if r['inviter_username'] else "без username"
+        await message.answer(
+            f"<b>{r['inviter_name'] or 'Пользователь'}</b> · {username}\n"
+            f"Приглашено: {r['total']}\n"
+            f"Креаторов: {r['creators'] or 0} · Бизнесов: {r['businesses'] or 0}"
+        )
+
+
 def export_excel_bytes() -> bytes:
     conn = db()
     datasets = {
@@ -1272,6 +1393,10 @@ def export_excel_bytes() -> bytes:
         ).fetchall(),
         "Отклики": conn.execute(
             "SELECT response_id, request_id, creator_user_id, business_user_id, status, created_at FROM responses ORDER BY response_id"
+        ).fetchall(),
+        "Рефералы": conn.execute(
+            """SELECT user_id, username, full_name, role, referred_by, referral_created_at, created_at
+            FROM users WHERE referred_by IS NOT NULL ORDER BY referral_created_at"""
         ).fetchall(),
     }
     conn.close()
