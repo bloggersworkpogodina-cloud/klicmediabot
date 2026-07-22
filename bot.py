@@ -150,9 +150,31 @@ def upsert_user(message: Message, role: Optional[str] = None) -> None:
 
 def main_menu_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Я бизнес", callback_data="role_business")
-    kb.button(text="Я креатор", callback_data="role_creator")
+    kb.button(text="Я креатор", callback_data="role_creator_intro")
+    kb.button(text="Я бизнес", callback_data="role_business_intro")
     kb.button(text="Как это работает", callback_data="how_it_works")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def back_to_main_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Назад", callback_data="main_menu")
+    return kb.as_markup()
+
+
+def creator_intro_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Начать регистрацию", callback_data="creator_register")
+    kb.button(text="Назад", callback_data="main_menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def business_intro_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Создать профиль", callback_data="business_register")
+    kb.button(text="Назад", callback_data="main_menu")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -161,21 +183,22 @@ def business_menu_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Создать заявку", callback_data="business_create_request")
     kb.button(text="Мои заявки", callback_data="business_my_requests")
-    kb.button(text="Мои отклики", callback_data="business_responses")
-    kb.button(text="Главное меню", callback_data="main_menu")
+    kb.button(text="Отклики креаторов", callback_data="business_responses")
+    kb.button(text="Мой профиль", callback_data="business_profile")
+    kb.button(text="Помощь", callback_data="help_business")
     kb.adjust(1)
     return kb.as_markup()
 
 
 def creator_menu_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Смотреть заявки", callback_data="creator_view_requests")
+    kb.button(text="Проекты", callback_data="creator_view_requests")
     kb.button(text="Мои отклики", callback_data="creator_my_responses")
-    kb.button(text="Редактировать анкету", callback_data="creator_register")
-    kb.button(text="Главное меню", callback_data="main_menu")
+    kb.button(text="Мой профиль", callback_data="creator_profile")
+    kb.button(text="Настройки", callback_data="creator_settings")
+    kb.button(text="Помощь", callback_data="help_creator")
     kb.adjust(1)
     return kb.as_markup()
-
 
 def request_kb(request_id: int):
     kb = InlineKeyboardBuilder()
@@ -281,7 +304,10 @@ async def start(message: Message, state: FSMContext):
     await state.clear()
     upsert_user(message)
     await message.answer(
-        "Привет! Это бот для коллабораций между бизнесом и креаторами.\n\nВыберите, кто вы:",
+        "<b>КЛИК | Медиа-маркет</b>\n\n"
+        "Платформа, где <b>бизнес находит креаторов</b>, а <b>креаторы — проекты, рекламу и коллаборации</b>.\n\n"
+        "Без бесконечных переписок и поиска по чатам.\n\n"
+        "Выберите, кто вы:",
         reply_markup=main_menu_kb()
     )
 
@@ -289,30 +315,45 @@ async def start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "main_menu")
 async def main_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Главное меню:", reply_markup=main_menu_kb())
+    await callback.message.edit_text(
+        "<b>КЛИК | Медиа-маркет</b>\n\nВыберите, кто вы:",
+        reply_markup=main_menu_kb()
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data == "how_it_works")
 async def how_it_works(callback: CallbackQuery):
     await callback.message.edit_text(
-        "<b>Как это работает</b>\n\n"
-        "1. Бизнес создаёт заявку.\n"
-        "2. Креаторы смотрят заявки и откликаются.\n"
-        "3. Бизнес принимает или отклоняет отклик.\n"
-        "4. Если бизнес принимает — бот открывает контакты обеим сторонам.",
-        reply_markup=main_menu_kb()
+        "<b>Как работает КЛИК</b>\n\n"
+        "Бизнес размещает проект и условия сотрудничества.\n\n"
+        "Креаторы находят подходящие проекты и нажимают <b>«Откликнуться»</b>.\n\n"
+        "Бизнес видит профиль креатора и выбирает: <b>принять</b> или <b>отклонить</b> отклик.\n\n"
+        "После принятия КЛИК открывает контакты обеим сторонам.",
+        reply_markup=back_to_main_kb()
     )
     await callback.answer()
 
 
 # ---------- Business registration ----------
 
-@router.callback_query(F.data == "role_business")
+@router.callback_query(F.data == "role_business_intro")
+async def role_business_intro(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "<b>Найдём вам подходящих креаторов.</b>\n\n"
+        "Создайте профиль бизнеса, а затем разместите заявку: укажите город, задачу и условия сотрудничества.\n\n"
+        "Креаторы смогут откликнуться, а вы — <b>принять или отклонить отклик</b>.",
+        reply_markup=business_intro_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "business_register")
 async def role_business(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(BusinessForm.business_name)
-    await callback.message.edit_text("Введите название бизнеса:")
+    await callback.message.edit_text("<b>Создаём профиль бизнеса</b>\n\nВведите название бизнеса:")
     await callback.answer()
 
 
@@ -360,16 +401,32 @@ async def business_contact(message: Message, state: FSMContext):
     conn.commit()
     conn.close()
     await state.clear()
-    await message.answer("Профиль бизнеса сохранён.", reply_markup=business_menu_kb())
+    await message.answer(
+        "<b>Готово. Ваш профиль создан.</b>\n\n"
+        "Теперь можно разместить первую заявку и начать получать отклики креаторов.",
+        reply_markup=business_menu_kb()
+    )
 
 
 # ---------- Creator registration ----------
 
-@router.callback_query(F.data.in_({"role_creator", "creator_register"}))
+@router.callback_query(F.data == "role_creator_intro")
+async def role_creator_intro(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "<b>Давайте создадим ваш профиль.</b>\n\n"
+        "Он понадобится, чтобы бизнес видел вас в откликах, а КЛИК мог показывать подходящие проекты.\n\n"
+        "Это займёт около 2 минут.",
+        reply_markup=creator_intro_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "creator_register")
 async def role_creator(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(CreatorForm.name)
-    await callback.message.edit_text("Введите ваше имя:")
+    await callback.message.edit_text("<b>Создаём профиль креатора</b>\n\nКак вас зовут?")
     await callback.answer()
 
 
@@ -449,7 +506,11 @@ async def creator_contact(message: Message, state: FSMContext):
     conn.commit()
     conn.close()
     await state.clear()
-    await message.answer("Анкета креатора сохранена.", reply_markup=creator_menu_kb())
+    await message.answer(
+        "<b>Готово. Ваш профиль создан.</b>\n\n"
+        "Теперь можно смотреть актуальные проекты и откликаться на подходящие предложения.",
+        reply_markup=creator_menu_kb()
+    )
 
 
 # ---------- Business request creation ----------
@@ -719,6 +780,60 @@ async def creator_my_responses(callback: CallbackQuery):
         )
     await callback.answer()
 
+
+# ---------- Profiles / help ----------
+
+@router.callback_query(F.data == "business_profile")
+async def business_profile(callback: CallbackQuery):
+    conn = db()
+    p = conn.execute("SELECT * FROM business_profiles WHERE user_id=?", (callback.from_user.id,)).fetchone()
+    conn.close()
+    if not p:
+        await callback.message.edit_text("Профиль бизнеса пока не заполнен.", reply_markup=business_intro_kb())
+    else:
+        await callback.message.edit_text(
+            "<b>Мой профиль</b>\n\n"
+            f"Бизнес: {p['business_name']}\n"
+            f"Город: {p['city']}\n"
+            f"Ниша: {p['niche']}\n"
+            f"Соцсети: {p['social_link']}\n"
+            f"Контакт: {p['contact']}",
+            reply_markup=business_menu_kb()
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "creator_profile")
+async def creator_profile(callback: CallbackQuery):
+    conn = db()
+    c = conn.execute("SELECT * FROM creators WHERE user_id=?", (callback.from_user.id,)).fetchone()
+    conn.close()
+    if not c:
+        await callback.message.edit_text("Профиль креатора пока не заполнен.", reply_markup=creator_intro_kb())
+    else:
+        await callback.message.edit_text(creator_card(c), reply_markup=creator_menu_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "creator_settings")
+async def creator_settings(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "<b>Настройки</b>\n\nСкоро здесь появятся настройки города, уведомлений и форматов сотрудничества.",
+        reply_markup=creator_menu_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"help_creator", "help_business"}))
+async def help_section(callback: CallbackQuery):
+    is_business = callback.data == "help_business"
+    await callback.message.edit_text(
+        "<b>Помощь</b>\n\n"
+        "КЛИК соединяет бизнес и креаторов.\n\n"
+        "Если что-то не получается, напишите администратору проекта. Контакт добавим перед публичным запуском.",
+        reply_markup=business_menu_kb() if is_business else creator_menu_kb()
+    )
+    await callback.answer()
 
 # ---------- Admin ----------
 
