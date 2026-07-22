@@ -166,6 +166,19 @@ def init_db() -> None:
             """
         )
         # Safe migrations for databases created by an older release.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_businesses (
+                business_id BIGSERIAL PRIMARY KEY,
+                business_name TEXT NOT NULL,
+                city TEXT,
+                niche TEXT,
+                social_link TEXT,
+                contact TEXT,
+                created_at TEXT
+            )
+            """
+        )
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_at TEXT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT")
@@ -260,6 +273,19 @@ def init_db() -> None:
             conn.execute("ALTER TABLE requests ADD COLUMN moderated_at TEXT")
         if "moderated_by" not in columns:
             conn.execute("ALTER TABLE requests ADD COLUMN moderated_by INTEGER")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_businesses (
+                business_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                business_name TEXT NOT NULL,
+                city TEXT,
+                niche TEXT,
+                social_link TEXT,
+                contact TEXT,
+                created_at TEXT
+            )
+            """
+        )
         user_columns = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "referred_by" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
@@ -373,6 +399,23 @@ def creator_intro_kb():
     return kb.as_markup()
 
 
+def admin_businesses_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить бизнес", callback_data="admin_business_add")
+    kb.button(text="📋 Все бизнесы", callback_data="admin_business_list")
+    kb.button(text="➕ Создать заявку", callback_data="admin_request_choose_business")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def admin_business_card_kb(business_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Создать заявку", callback_data=f"admin_request_for:{business_id}")
+    kb.button(text="✏️ Редактировать", callback_data=f"admin_business_edit:{business_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def single_choice_kb(prefix: str, options: list[str]):
     kb = InlineKeyboardBuilder()
     for i, option in enumerate(options):
@@ -465,7 +508,7 @@ def owner_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🛡 Модерация"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="👥 Медиа-база"), KeyboardButton(text="🏢 База бизнесов")],
+            [KeyboardButton(text="👥 Медиа-база"), KeyboardButton(text="🏢 Бизнесы")],
             [KeyboardButton(text="📋 Все заявки"), KeyboardButton(text="💬 Все отклики")],
             [KeyboardButton(text="📥 Выгрузить Excel"), KeyboardButton(text="📣 Рассылка")],
             [KeyboardButton(text="🔗 Рефералы"), KeyboardButton(text="👤 Режим пользователя")],
@@ -513,6 +556,22 @@ class CreatorForm(StatesGroup):
     excluded_topics = State()
     brief_ready = State()
     contact = State()
+
+
+class AdminBusinessForm(StatesGroup):
+    business_name = State()
+    city = State()
+    niche = State()
+    social_link = State()
+    contact = State()
+
+
+class AdminRequestForm(StatesGroup):
+    title = State()
+    city = State()
+    task = State()
+    cooperation_format = State()
+    budget = State()
 
 
 class BusinessForm(StatesGroup):
@@ -1129,6 +1188,283 @@ async def creator_contact(message: Message, state: FSMContext):
     )
 
 
+
+# ---------- Owner businesses ----------
+
+@router.message(F.text == "🏢 Бизнесы")
+async def owner_businesses(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer(
+        "<b>Бизнесы</b>\n\n"
+        "Добавляйте бизнесы вручную и создавайте от их имени заявки.",
+        reply_markup=admin_businesses_kb()
+    )
+
+
+@router.callback_query(F.data == "admin_business_add")
+async def admin_business_add(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    await state.set_state(AdminBusinessForm.business_name)
+    await callback.message.edit_text("<b>Добавить бизнес</b>\n\nНазвание бизнеса:")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_business_edit:"))
+async def admin_business_edit(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    business_id = int(callback.data.split(":")[1])
+    await state.clear()
+    await state.update_data(edit_business_id=business_id)
+    await state.set_state(AdminBusinessForm.business_name)
+    await callback.message.answer(
+        "<b>Редактировать бизнес</b>\n\n"
+        "Введите данные заново — они заменят текущие.\n\nНазвание бизнеса:"
+    )
+    await callback.answer()
+
+
+@router.message(AdminBusinessForm.business_name)
+async def admin_business_name(message: Message, state: FSMContext):
+    await state.update_data(business_name=message.text.strip())
+    await state.set_state(AdminBusinessForm.city)
+    await message.answer("Город / онлайн:")
+
+
+@router.message(AdminBusinessForm.city)
+async def admin_business_city(message: Message, state: FSMContext):
+    await state.update_data(city=message.text.strip())
+    await state.set_state(AdminBusinessForm.niche)
+    await message.answer("Ниша бизнеса:")
+
+
+@router.message(AdminBusinessForm.niche)
+async def admin_business_niche(message: Message, state: FSMContext):
+    await state.update_data(niche=message.text.strip())
+    await state.set_state(AdminBusinessForm.social_link)
+    await message.answer("Ссылка на соцсети бизнеса:")
+
+
+@router.message(AdminBusinessForm.social_link)
+async def admin_business_social(message: Message, state: FSMContext):
+    await state.update_data(social_link=message.text.strip())
+    await state.set_state(AdminBusinessForm.contact)
+    await message.answer("Контакт для связи:")
+
+
+@router.message(AdminBusinessForm.contact)
+async def admin_business_contact(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    conn = db()
+    edit_id = data.get("edit_business_id")
+    if edit_id:
+        conn.execute(
+            """
+            UPDATE admin_businesses
+            SET business_name=?, city=?, niche=?, social_link=?, contact=?
+            WHERE business_id=?
+            """,
+            (
+                data["business_name"], data["city"], data["niche"],
+                data["social_link"], message.text.strip(), edit_id
+            )
+        )
+        result_text = "<b>Карточка бизнеса обновлена.</b>"
+    else:
+        conn.execute(
+            """
+            INSERT INTO admin_businesses
+            (business_name, city, niche, social_link, contact, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                data["business_name"], data["city"], data["niche"],
+                data["social_link"], message.text.strip(), datetime.now().isoformat()
+            )
+        )
+        result_text = "<b>Бизнес добавлен.</b>"
+    conn.commit()
+    conn.close()
+    await state.clear()
+    await message.answer(result_text, reply_markup=admin_businesses_kb())
+
+
+@router.callback_query(F.data == "admin_business_list")
+async def admin_business_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM admin_businesses ORDER BY business_id DESC LIMIT 30"
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        await callback.message.edit_text(
+            "Бизнесов пока нет.",
+            reply_markup=admin_businesses_kb()
+        )
+        await callback.answer()
+        return
+
+    await callback.message.edit_text("<b>Все бизнесы</b>")
+    for b in rows:
+        await callback.message.answer(
+            f"<b>{b['business_name']}</b>\n"
+            f"Город: {b['city'] or '—'}\n"
+            f"Ниша: {b['niche'] or '—'}\n"
+            f"Соцсети: {b['social_link'] or '—'}\n"
+            f"Контакт: {b['contact'] or '—'}",
+            reply_markup=admin_business_card_kb(b["business_id"])
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_request_choose_business")
+async def admin_request_choose_business(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    conn = db()
+    rows = conn.execute(
+        "SELECT business_id, business_name FROM admin_businesses ORDER BY business_name"
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        await callback.message.edit_text(
+            "Сначала добавьте хотя бы один бизнес.",
+            reply_markup=admin_businesses_kb()
+        )
+        await callback.answer()
+        return
+
+    kb = InlineKeyboardBuilder()
+    for b in rows:
+        kb.button(
+            text=b["business_name"],
+            callback_data=f"admin_request_for:{b['business_id']}"
+        )
+    kb.adjust(1)
+    await callback.message.edit_text("<b>Выберите бизнес</b>", reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_request_for:"))
+async def admin_request_for_business(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    business_id = int(callback.data.split(":")[1])
+
+    conn = db()
+    business = conn.execute(
+        "SELECT * FROM admin_businesses WHERE business_id=?",
+        (business_id,)
+    ).fetchone()
+    conn.close()
+
+    if not business:
+        await callback.answer("Бизнес не найден", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(admin_business_id=business_id)
+    await state.set_state(AdminRequestForm.title)
+    await callback.message.answer(
+        f"<b>Новая заявка от {business['business_name']}</b>\n\n"
+        "Короткий заголовок заявки:"
+    )
+    await callback.answer()
+
+
+@router.message(AdminRequestForm.title)
+async def admin_request_title(message: Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(AdminRequestForm.city)
+    await message.answer("Город / география проекта:")
+
+
+@router.message(AdminRequestForm.city)
+async def admin_request_city(message: Message, state: FSMContext):
+    await state.update_data(city=message.text.strip())
+    await state.set_state(AdminRequestForm.task)
+    await message.answer("Что нужно сделать блогеру?")
+
+
+@router.message(AdminRequestForm.task)
+async def admin_request_task(message: Message, state: FSMContext):
+    await state.update_data(task=message.text.strip())
+    await state.set_state(AdminRequestForm.cooperation_format)
+    await message.answer("Формат сотрудничества: оплата / бартер / % / другое:")
+
+
+@router.message(AdminRequestForm.cooperation_format)
+async def admin_request_cooperation(message: Message, state: FSMContext):
+    await state.update_data(cooperation_format=message.text.strip())
+    await state.set_state(AdminRequestForm.budget)
+    await message.answer("Бюджет / условия:")
+
+
+@router.message(AdminRequestForm.budget)
+async def admin_request_budget(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    data = await state.get_data()
+    conn = db()
+    business = conn.execute(
+        "SELECT * FROM admin_businesses WHERE business_id=?",
+        (data["admin_business_id"],)
+    ).fetchone()
+
+    if not business:
+        conn.close()
+        await state.clear()
+        await message.answer("Бизнес не найден.", reply_markup=owner_reply_kb())
+        return
+
+    full_task = f"{data['title']}\n\n{data['task']}"
+    row = conn.execute(
+        """
+        INSERT INTO requests
+        (business_user_id, business_name, city, niche, task, creator_needed,
+         cooperation_format, budget, social_link, contact, status, created_at,
+         moderated_at, moderated_by)
+        VALUES (?, ?, ?, ?, ?, 'Блогер', ?, ?, ?, ?, 'active', ?, ?, ?)
+        RETURNING request_id
+        """,
+        (
+            message.from_user.id,
+            business["business_name"],
+            data["city"],
+            business["niche"],
+            full_task,
+            data["cooperation_format"],
+            message.text.strip(),
+            business["social_link"],
+            business["contact"],
+            datetime.now().isoformat(),
+            datetime.now().isoformat(),
+            message.from_user.id
+        )
+    ).fetchone()
+    request_id = row["request_id"]
+    conn.commit()
+    conn.close()
+    await state.clear()
+
+    await message.answer(
+        f"<b>Заявка опубликована.</b>\n\n"
+        f"Бизнес: {business['business_name']}\n"
+        f"Заявка #{request_id}\n\n"
+        "Она уже доступна блогерам в разделе «Проекты».",
+        reply_markup=owner_reply_kb()
+    )
+
 # ---------- Profile editing ----------
 
 @router.callback_query(F.data == "creator_edit_profile")
@@ -1314,15 +1650,22 @@ async def accept_response(callback: CallbackQuery, bot: Bot):
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        "Отклик принят. Контакты креатора:\n\n" + contact_line(creator["user_id"], creator["contact"])
+        "Отклик принят. Контакты блогера:\n\n" + contact_line(creator["user_id"], creator["contact"])
     )
+
+    if business:
+        business_contacts = contact_line(business["user_id"], business["contact"])
+    else:
+        # Для бизнеса, добавленного владельцем вручную.
+        business_contacts = request["contact"] or "Представитель проекта свяжется с вами."
+
     await bot.send_message(
         creator["user_id"],
         "Ваш отклик принят 🎉\n\n"
         f"Бизнес: {request['business_name']}\n"
         f"Заявка: {request['task']}\n\n"
         "Контакты бизнеса:\n"
-        + contact_line(business["user_id"], business["contact"])
+        + business_contacts
     )
     await callback.answer("Принято")
 
@@ -1746,9 +2089,13 @@ async def owner_responses(message: Message):
         return
     await message.answer(f"<b>Последние отклики: {len(rows)}</b>", reply_markup=owner_reply_kb())
     for r in rows:
+        markup = business_decision_kb(r["response_id"]) if r["status"] == "new" else None
         await message.answer(
             f"#{r['response_id']} · {r['status']}\n"
-            f"Бизнес: {r['business_name']}\nКреатор: {r['name']}\nЗадача: {r['task']}"
+            f"Бизнес: {r['business_name']}\n"
+            f"Блогер: {r['name']}\n"
+            f"Задача: {r['task']}",
+            reply_markup=markup
         )
 
 
