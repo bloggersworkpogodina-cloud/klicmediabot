@@ -89,6 +89,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS creators (
                 user_id BIGINT PRIMARY KEY,
                 name TEXT,
+                photo_file_id TEXT,
                 country TEXT,
                 region TEXT,
                 city TEXT,
@@ -190,7 +191,7 @@ def init_db() -> None:
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_created_at TEXT")
         for column, coltype in [
-            ("country", "TEXT"), ("region", "TEXT"), ("work_format", "TEXT"),
+            ("photo_file_id", "TEXT"), ("country", "TEXT"), ("region", "TEXT"), ("work_format", "TEXT"),
             ("travel_scope", "TEXT"), ("blog2_platform", "TEXT"), ("blog2_link", "TEXT"),
             ("blog2_followers", "TEXT"), ("blog2_reach", "TEXT"), ("ad_formats", "TEXT"),
             ("price", "TEXT"), ("excluded_topics", "TEXT"), ("brief_ready", "TEXT"),
@@ -302,7 +303,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN referral_created_at TEXT")
         creator_columns = {r[1] for r in conn.execute("PRAGMA table_info(creators)").fetchall()}
         for column in [
-            "country", "region", "work_format", "travel_scope", "blog2_platform",
+            "photo_file_id", "country", "region", "work_format", "travel_scope", "blog2_platform",
             "blog2_link", "blog2_followers", "blog2_reach", "ad_formats", "price",
             "excluded_topics", "brief_ready", "content_types", "industries",
             "on_camera", "creator_skills", "portfolio_link", "delivery_available"
@@ -557,6 +558,7 @@ def moderation_kb(request_id: int):
 
 class CreatorForm(StatesGroup):
     name = State()
+    photo = State()
     country = State()
     country_other = State()
     region = State()
@@ -584,6 +586,7 @@ class CreatorForm(StatesGroup):
 
 class ContentCreatorForm(StatesGroup):
     name = State()
+    photo = State()
     country = State()
     country_other = State()
     region = State()
@@ -696,6 +699,16 @@ def creator_card(c) -> str:
         f"Сотрудничество: {c['cooperation_formats'] or '—'}\n"
         f"Стоимость: {c['price'] or 'Обсуждается'}"
     )
+
+
+async def send_creator_card(message: Message, creator, reply_markup=None, include_contact: bool = False):
+    text = creator_card(creator)
+    if include_contact:
+        text += "\n\n" + contact_line(creator["user_id"], creator["contact"])
+    if creator["photo_file_id"]:
+        await message.answer_photo(creator["photo_file_id"], caption=text, reply_markup=reply_markup)
+    else:
+        await message.answer(text, reply_markup=reply_markup)
 
 
 def contact_line(user_id: int, contact: str) -> str:
@@ -897,11 +910,26 @@ async def content_creator_start(callback: CallbackQuery, state: FSMContext):
 @router.message(ContentCreatorForm.name)
 async def cc_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
+    await state.set_state(ContentCreatorForm.photo)
+    await message.answer(
+        "2. <b>Добавьте фото для вашей карточки</b>\n\n"
+        "Отправьте одно фото, на котором вас хорошо видно."
+    )
+
+
+@router.message(ContentCreatorForm.photo, F.photo)
+async def cc_photo(message: Message, state: FSMContext):
+    await state.update_data(photo_file_id=message.photo[-1].file_id)
     await state.set_state(ContentCreatorForm.country)
     await message.answer(
-        "2. <b>Где вы находитесь?</b>",
+        "3. <b>Где вы находитесь?</b>",
         reply_markup=single_choice_kb("cc_country", ["Россия", "Другая страна"])
     )
+
+
+@router.message(ContentCreatorForm.photo)
+async def cc_photo_invalid(message: Message):
+    await message.answer("Пришлите, пожалуйста, именно фотографию.")
 
 
 @router.callback_query(ContentCreatorForm.country, F.data.startswith("cc_country:"))
@@ -1165,14 +1193,15 @@ async def cc_contact(message: Message, state: FSMContext):
         """
         INSERT INTO creators
         (
-            user_id, name, country, region, city, creator_type,
+            user_id, name, photo_file_id, country, region, city, creator_type,
             work_format, travel_scope, content_types, industries,
             on_camera, creator_skills, portfolio_link, delivery_available,
             cooperation_formats, price, excluded_topics, contact, status
         )
-        VALUES (?, ?, ?, ?, ?, 'Контент-креатор', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, ?, 'Контент-креатор', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT (user_id) DO UPDATE SET
             name=excluded.name,
+            photo_file_id=excluded.photo_file_id,
             country=excluded.country,
             region=excluded.region,
             city=excluded.city,
@@ -1194,6 +1223,7 @@ async def cc_contact(message: Message, state: FSMContext):
         (
             message.from_user.id,
             data["name"],
+            data.get("photo_file_id"),
             data.get("country"),
             data.get("region"),
             data.get("city"),
@@ -1233,11 +1263,26 @@ async def role_creator(callback: CallbackQuery, state: FSMContext):
 @router.message(CreatorForm.name)
 async def creator_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
+    await state.set_state(CreatorForm.photo)
+    await message.answer(
+        "2. <b>Добавьте фото для вашей карточки</b>\n\n"
+        "Отправьте одно фото, на котором вас хорошо видно."
+    )
+
+
+@router.message(CreatorForm.photo, F.photo)
+async def creator_photo(message: Message, state: FSMContext):
+    await state.update_data(photo_file_id=message.photo[-1].file_id)
     await state.set_state(CreatorForm.country)
     await message.answer(
-        "2. <b>Где вы находитесь?</b>",
+        "3. <b>Где вы находитесь?</b>",
         reply_markup=single_choice_kb("blog_country", ["Россия", "Другая страна"])
     )
+
+
+@router.message(CreatorForm.photo)
+async def creator_photo_invalid(message: Message):
+    await message.answer("Пришлите, пожалуйста, именно фотографию.")
 
 
 @router.callback_query(CreatorForm.country, F.data.startswith("blog_country:"))
@@ -1544,12 +1589,12 @@ async def creator_contact(message: Message, state: FSMContext):
     conn.execute(
         """
         INSERT INTO creators
-        (user_id, name, country, region, city, creator_type, niche, work_format, travel_scope,
+        (user_id, name, photo_file_id, country, region, city, creator_type, niche, work_format, travel_scope,
          social_link, followers, reach, blog2_platform, blog2_link, blog2_followers, blog2_reach,
          ad_formats, cooperation_formats, price, excluded_topics, brief_ready, contact, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT (user_id) DO UPDATE SET
-            name=excluded.name, country=excluded.country, region=excluded.region, city=excluded.city,
+            name=excluded.name, photo_file_id=excluded.photo_file_id, country=excluded.country, region=excluded.region, city=excluded.city,
             creator_type=excluded.creator_type, niche=excluded.niche, work_format=excluded.work_format,
             travel_scope=excluded.travel_scope, social_link=excluded.social_link,
             followers=excluded.followers, reach=excluded.reach,
@@ -1560,7 +1605,7 @@ async def creator_contact(message: Message, state: FSMContext):
             brief_ready=excluded.brief_ready, contact=excluded.contact, status='active'
         """,
         (
-            message.from_user.id, data["name"], data.get("country"), data.get("region"), data.get("city"),
+            message.from_user.id, data["name"], data.get("photo_file_id"), data.get("country"), data.get("region"), data.get("city"),
             "Блогер", data.get("niche"), data.get("work_format"), data.get("travel_scope"),
             data.get("social_link"), data.get("followers"), data.get("reach"),
             data.get("blog2_platform"), data.get("blog2_link"), data.get("blog2_followers"), data.get("blog2_reach"),
@@ -2024,14 +2069,25 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
     await callback.answer("Отклик отправлен")
     await callback.message.answer("Ваш отклик отправлен бизнесу.")
 
-    await bot.send_message(
-        request["business_user_id"],
+    response_text = (
         "<b>Новый отклик на вашу заявку</b>\n\n"
         + request_card(request)
         + "\n\n"
-        + creator_card(creator),
-        reply_markup=business_decision_kb(response_id)
+        + creator_card(creator)
     )
+    if creator["photo_file_id"]:
+        await bot.send_photo(
+            request["business_user_id"],
+            creator["photo_file_id"],
+            caption=response_text,
+            reply_markup=business_decision_kb(response_id)
+        )
+    else:
+        await bot.send_message(
+            request["business_user_id"],
+            response_text,
+            reply_markup=business_decision_kb(response_id)
+        )
 
 
 # ---------- Business accepts/declines ----------
@@ -2230,7 +2286,11 @@ async def creator_profile(callback: CallbackQuery):
     if not c:
         await callback.message.edit_text("Профиль креатора пока не заполнен.", reply_markup=creator_intro_kb())
     else:
-        await callback.message.edit_text(creator_card(c), reply_markup=creator_menu_kb())
+        if c["photo_file_id"]:
+            await callback.message.delete()
+            await send_creator_card(callback.message, c, reply_markup=creator_menu_kb())
+        else:
+            await callback.message.edit_text(creator_card(c), reply_markup=creator_menu_kb())
     await callback.answer()
 
 
@@ -2428,7 +2488,7 @@ async def owner_creators(message: Message):
         return
     await message.answer(f"<b>Медиа-база — {len(rows)} последних</b>", reply_markup=owner_reply_kb())
     for c in rows:
-        await message.answer(creator_card(c) + "\n\n" + contact_line(c["user_id"], c["contact"]))
+        await send_creator_card(message, c, include_contact=True)
 
 
 @router.message(F.text == "🏢 База бизнесов")
@@ -2543,7 +2603,7 @@ def export_excel_bytes() -> bytes:
     conn = db()
     datasets = {
         "Креаторы": conn.execute(
-            "SELECT user_id, name, country, region, city, creator_type, niche, work_format, travel_scope, social_link, followers, reach, blog2_platform, blog2_link, blog2_followers, blog2_reach, ad_formats, content_types, industries, on_camera, creator_skills, portfolio_link, delivery_available, cooperation_formats, price, excluded_topics, brief_ready, contact, status FROM creators ORDER BY user_id"
+            "SELECT user_id, name, photo_file_id, country, region, city, creator_type, niche, work_format, travel_scope, social_link, followers, reach, blog2_platform, blog2_link, blog2_followers, blog2_reach, ad_formats, content_types, industries, on_camera, creator_skills, portfolio_link, delivery_available, cooperation_formats, price, excluded_topics, brief_ready, contact, status FROM creators ORDER BY user_id"
         ).fetchall(),
         "Бизнес": conn.execute(
             "SELECT user_id, business_name, city, niche, social_link, contact FROM business_profiles ORDER BY user_id"
