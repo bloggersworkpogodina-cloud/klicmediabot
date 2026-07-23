@@ -2436,7 +2436,8 @@ async def moderate_reject(callback: CallbackQuery, bot: Bot):
 async def stats_text() -> str:
     conn = db()
     users = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
-    creators = conn.execute("SELECT COUNT(*) AS c FROM creators").fetchone()["c"]
+    bloggers = conn.execute("SELECT COUNT(*) AS c FROM creators WHERE creator_type='Блогер'").fetchone()["c"]
+    content_creators = conn.execute("SELECT COUNT(*) AS c FROM creators WHERE creator_type='Контент-креатор'").fetchone()["c"]
     businesses = conn.execute("SELECT COUNT(*) AS c FROM business_profiles").fetchone()["c"]
     requests = conn.execute("SELECT COUNT(*) AS c FROM requests").fetchone()["c"]
     pending = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE status='pending'").fetchone()["c"]
@@ -2449,7 +2450,8 @@ async def stats_text() -> str:
     return (
         "<b>Статистика КЛИК</b>\n\n"
         f"Пользователи: {users}\n"
-        f"Креаторы: {creators}\n"
+        f"Блогеры: {bloggers}\n"
+        f"Контент-креаторы: {content_creators}\n"
         f"Бизнесы: {businesses}\n\n"
         f"Заявки: {requests}\n"
         f"На модерации: {pending}\n"
@@ -2476,19 +2478,62 @@ async def admin_stats(callback: CallbackQuery):
     await callback.answer()
 
 
+def media_base_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Блогеры", callback_data="media_base:bloggers")
+    kb.button(text="Контент-креаторы", callback_data="media_base:content")
+    kb.button(text="Все", callback_data="media_base:all")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 @router.message(F.text.in_({"👥 База креаторов", "👥 Медиа-база"}))
 async def owner_creators(message: Message):
     if not is_admin(message.from_user.id):
         return
-    conn = db()
-    rows = conn.execute("SELECT * FROM creators ORDER BY user_id DESC LIMIT 30").fetchall()
-    conn.close()
-    if not rows:
-        await message.answer("Креаторов пока нет.", reply_markup=owner_reply_kb())
+    await message.answer(
+        "<b>Медиа-база КЛИК</b>\n\nКого показать?",
+        reply_markup=media_base_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("media_base:"))
+async def owner_media_base_filter(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
-    await message.answer(f"<b>Медиа-база — {len(rows)} последних</b>", reply_markup=owner_reply_kb())
-    for c in rows:
-        await send_creator_card(message, c, include_contact=True)
+
+    kind = callback.data.split(":", 1)[1]
+    conn = db()
+    if kind == "bloggers":
+        rows = conn.execute(
+            "SELECT * FROM creators WHERE creator_type='Блогер' ORDER BY user_id DESC LIMIT 30"
+        ).fetchall()
+        title = "Блогеры"
+    elif kind == "content":
+        rows = conn.execute(
+            "SELECT * FROM creators WHERE creator_type='Контент-креатор' ORDER BY user_id DESC LIMIT 30"
+        ).fetchall()
+        title = "Контент-креаторы"
+    else:
+        rows = conn.execute(
+            "SELECT * FROM creators ORDER BY user_id DESC LIMIT 30"
+        ).fetchall()
+        title = "Все"
+
+    conn.close()
+    await callback.answer()
+
+    if not rows:
+        await callback.message.answer(f"{title}: пока никого нет.", reply_markup=owner_reply_kb())
+        return
+
+    await callback.message.answer(
+        f"<b>{title} — {len(rows)} последних</b>",
+        reply_markup=owner_reply_kb()
+    )
+    for creator in rows:
+        await send_creator_card(callback.message, creator, include_contact=True)
 
 
 @router.message(F.text == "🏢 База бизнесов")
