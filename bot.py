@@ -2,7 +2,7 @@ import asyncio
 import os
 import sqlite3
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -31,6 +31,8 @@ if OWNER_ID_RAW.isdigit():
     ADMIN_IDS.add(int(OWNER_ID_RAW))
 DB_PATH = os.getenv("DB_PATH", "collab_bot.db")
 USE_POSTGRES = bool(DATABASE_URL)
+BUSINESS_DIGEST_HOUR = int(os.getenv("BUSINESS_DIGEST_HOUR", "20"))
+MSK_TZ = timezone(timedelta(hours=3))
 
 router = Router()
 
@@ -215,6 +217,16 @@ def init_db() -> None:
         conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'")
         conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS moderated_at TEXT")
         conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS completed_at TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS business_digest_state (
+                business_user_id BIGINT PRIMARY KEY,
+                last_response_id BIGINT DEFAULT 0,
+                last_sent_at TEXT
+            )
+            """
+        )
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_at TEXT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT")
@@ -354,6 +366,20 @@ def init_db() -> None:
         for column in ["status", "moderated_at", "moderated_by"]:
             if column not in business_columns2:
                 conn.execute(f"ALTER TABLE business_profiles ADD COLUMN {column} TEXT")
+
+        request_columns_v20 = {r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()}
+        if "completed_at" not in request_columns_v20:
+            conn.execute("ALTER TABLE requests ADD COLUMN completed_at TEXT")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS business_digest_state (
+                business_user_id INTEGER PRIMARY KEY,
+                last_response_id INTEGER DEFAULT 0,
+                last_sent_at TEXT
+            )
+            """
+        )
 
         user_columns = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "referred_by" not in user_columns:
@@ -595,6 +621,24 @@ def request_kb(request_id: int):
     return kb.as_markup()
 
 
+def business_project_kb(request_id: int, status: str):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Посмотреть отклики", callback_data="business_responses")
+    if status == "active":
+        kb.button(text="Завершить проект", callback_data=f"complete_project:{request_id}")
+    if status == "completed":
+        kb.button(text="Итоги проекта", callback_data=f"project_summary:{request_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def business_digest_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Посмотреть отклики", callback_data="business_responses")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def business_decision_kb(response_id: int):
     kb = InlineKeyboardBuilder()
     kb.button(text="Принять", callback_data=f"accept:{response_id}")
@@ -727,6 +771,49 @@ def init_support_tables():
         """)
     conn.commit()
     conn.close()
+
+
+
+async def refresh_user_menu(message: Message):
+    """Send the current persistent keyboard for this user's role."""
+    user_id = message.from_user.id
+
+    if is_admin(user_id):
+        await message.answer(
+            "Меню обновлено.",
+            reply_markup=owner_reply_kb()
+        )
+        return
+
+    conn = db()
+    business = conn.execute(
+        "SELECT status FROM business_profiles WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+    creator = conn.execute(
+        "SELECT creator_type, status FROM creators WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+    conn.close()
+
+    if business:
+        await message.answer(
+            "Меню обновлено.",
+            reply_markup=business_menu_kb()
+        )
+        return
+
+    if creator:
+        await message.answer(
+            "Меню обновлено.",
+            reply_markup=creator_menu_kb()
+        )
+        return
+
+    await message.answer(
+        "Откройте главное меню:",
+        reply_markup=main_menu_kb()
+    )
 
 
 def owner_reply_kb():
@@ -884,6 +971,159 @@ class RequestForm(StatesGroup):
 # =========================
 # Formatters
 # =========================
+
+
+def _norm_geo(value: str) -> str:
+    return (value or "").strip().lower().replace("ё", "е")
+
+
+def creator_matches_request_geo(creator, request) -> bool:
+    """Match only notification delivery. Project remains available in the catalogue."""
+    work_format = _norm_geo(request["work_format"] if "work_format" in request.keys() else "")
+
+    # Remote projects are not geographically limited.
+    if "онлайн" in work_format and "оффлайн" not in work_format:
+        return True
+    if "удален" in work_format and "оффлайн" not in work_format:
+        return True
+
+    req_geo = _norm_geo(request["city"] if "city" in request.keys() else "")
+    if not req_geo or req_geo in {"неважно", "вся россия", "россия", "любой город"}:
+        return True
+
+    creator_city = _norm_geo(creator["city"] if "city" in creator.keys() else "")
+    creator_region = _norm_geo(creator["region"] if "region" in creator.keys() else "")
+    creator_country = _norm_geo(creator["country"] if "country" in creator.keys() else "")
+    travel = _norm_geo(creator["travel_ready"] if "travel_ready" in creator.keys() else "")
+
+    # Same city / region.
+    if creator_city and (creator_city in req_geo or req_geo in creator_city):
+        return True
+    if creator_region and (creator_region in req_geo or req_geo in creator_region):
+        return True
+
+    # Creators who explicitly indicated readiness to travel.
+    positive_travel = any(x in travel for x in [
+        "да", "готов", "по россии", "вся россия", "другие города", "выезд"
+    ])
+    if positive_travel:
+        return True
+
+    return False
+
+
+async def notify_matching_creators(request):
+    conn = db()
+    creator_type = request["creator_needed"]
+    rows = conn.execute(
+        """
+        SELECT * FROM creators
+        WHERE creator_type=?
+          AND COALESCE(status, 'pending')='active'
+        """,
+        (creator_type,)
+    ).fetchall()
+    conn.close()
+
+    sent = 0
+    for creator in rows:
+        if not creator_matches_request_geo(creator, request):
+            continue
+
+        title = (
+            "Новый проект для блогеров в КЛИК"
+            if creator_type == "Блогер"
+            else "Новый проект для контент-креаторов в КЛИК"
+        )
+
+        kb = InlineKeyboardBuilder()
+        kb.button(
+            text="Посмотреть проект",
+            callback_data=f"project_open:{request['request_id']}"
+        )
+
+        try:
+            await bot.send_message(
+                creator["user_id"],
+                f"<b>{title}</b>\n\n"
+                f"<b>{request['business_name']}</b>\n"
+                f"📍 {request['city'] or 'Онлайн'}\n"
+                f"Условия: {request['cooperation_format'] or '—'}\n"
+                f"Бюджет: {request['budget'] or 'Обсуждается'}\n"
+                f"Отклики до: {request['response_deadline'] or '—'}",
+                reply_markup=kb.as_markup()
+            )
+            sent += 1
+        except Exception:
+            pass
+
+    return sent
+
+
+
+def get_project_summary(request_id: int, business_user_id: int):
+    conn = db()
+    request = conn.execute(
+        """
+        SELECT * FROM requests
+        WHERE request_id=? AND business_user_id=?
+        """,
+        (request_id, business_user_id)
+    ).fetchone()
+
+    if not request:
+        conn.close()
+        return None, None
+
+    counts = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END) AS accepted,
+            SUM(CASE WHEN status='declined' THEN 1 ELSE 0 END) AS declined,
+            SUM(CASE WHEN status='new' THEN 1 ELSE 0 END) AS undecided
+        FROM responses
+        WHERE request_id=?
+        """,
+        (request_id,)
+    ).fetchone()
+
+    accepted_rows = conn.execute(
+        """
+        SELECT c.name
+        FROM responses r
+        JOIN creators c ON c.user_id=r.creator_user_id
+        WHERE r.request_id=? AND r.status='accepted'
+        ORDER BY r.response_id
+        """,
+        (request_id,)
+    ).fetchall()
+    conn.close()
+
+    accepted_names = [r["name"] for r in accepted_rows if r["name"]]
+    summary = {
+        "total": counts["total"] or 0,
+        "accepted": counts["accepted"] or 0,
+        "declined": counts["declined"] or 0,
+        "undecided": counts["undecided"] or 0,
+        "accepted_names": accepted_names,
+    }
+    return request, summary
+
+
+def project_summary_card(request, summary) -> str:
+    chosen = ", ".join(summary["accepted_names"]) if summary["accepted_names"] else "—"
+    return (
+        "<b>Итоги проекта</b>\n\n"
+        f"<b>{request['business_name']}</b>\n"
+        f"{request['task']}\n\n"
+        f"Всего откликов: <b>{summary['total']}</b>\n"
+        f"Принято: <b>{summary['accepted']}</b>\n"
+        f"Отклонено: {summary['declined']}\n"
+        f"Без решения: {summary['undecided']}\n\n"
+        f"<b>Выбранные творцы:</b> {chosen}"
+    )
+
 
 def request_card(r) -> str:
     def val(key, fallback="—"):
@@ -1992,6 +2232,36 @@ async def owner_return(callback: CallbackQuery, state: FSMContext):
 
 
 
+
+@router.message(Command("menu"))
+async def refresh_menu_command(message: Message, state: FSMContext):
+    await state.clear()
+    await refresh_user_menu(message)
+
+
+
+@router.callback_query(F.data.startswith("project_open:"))
+async def project_open_from_notification(callback: CallbackQuery):
+    request_id = int(callback.data.split(":")[1])
+    conn = db()
+    request = conn.execute(
+        "SELECT * FROM requests WHERE request_id=? AND status='active'",
+        (request_id,)
+    ).fetchone()
+    conn.close()
+
+    if not request:
+        await callback.answer("Эта заявка уже недоступна.", show_alert=True)
+        return
+
+    await send_request_card(
+        callback.message,
+        request,
+        reply_markup=response_kb(request_id)
+    )
+    await callback.answer()
+
+
 # ---------- Support / Messages ----------
 
 @router.callback_query(F.data == "support_start")
@@ -2042,6 +2312,7 @@ async def support_question(message: Message, state: FSMContext):
         "<b>Вопрос отправлен ✅</b>\n\n"
         "Команда КЛИК ответит вам в этом боте."
     )
+    await refresh_user_menu(message)
 
     username = f"@{message.from_user.username}" if message.from_user.username else "username не указан"
     for admin_id in ADMIN_IDS:
@@ -2221,7 +2492,14 @@ async def support_close(callback: CallbackQuery):
         (datetime.now().isoformat(), ticket_id)
     )
     conn.commit()
+    request_for_notify = conn.execute(
+        "SELECT * FROM requests WHERE request_id=?",
+        (request_id,)
+    ).fetchone() if 'request_id' in locals() else None
     conn.close()
+
+    if request_for_notify:
+        await notify_matching_creators(request_for_notify)
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer("Обращение закрыто")
@@ -3587,7 +3865,66 @@ async def business_my_requests(callback: CallbackQuery):
         return
     await callback.message.edit_text("Ваши заявки:")
     for r in rows:
-        await callback.message.answer(request_card(r))
+        await send_request_card(
+            callback.message,
+            r,
+            reply_markup=business_project_kb(r["request_id"], r["status"])
+        )
+    await callback.answer()
+
+
+
+@router.callback_query(F.data.startswith("complete_project:"))
+async def complete_project(callback: CallbackQuery):
+    request_id = int(callback.data.split(":")[1])
+
+    conn = db()
+    request = conn.execute(
+        """
+        SELECT * FROM requests
+        WHERE request_id=? AND business_user_id=?
+        """,
+        (request_id, callback.from_user.id)
+    ).fetchone()
+
+    if not request:
+        conn.close()
+        await callback.answer("Проект не найден", show_alert=True)
+        return
+
+    if request["status"] != "completed":
+        conn.execute(
+            """
+            UPDATE requests
+            SET status='completed', completed_at=?
+            WHERE request_id=? AND business_user_id=?
+            """,
+            (datetime.now(MSK_TZ).isoformat(), request_id, callback.from_user.id)
+        )
+        conn.commit()
+    conn.close()
+
+    request, summary = get_project_summary(request_id, callback.from_user.id)
+    await callback.message.answer(
+        project_summary_card(request, summary),
+        reply_markup=business_menu_kb(show_owner_return=is_admin(callback.from_user.id))
+    )
+    await callback.answer("Проект завершён")
+
+
+@router.callback_query(F.data.startswith("project_summary:"))
+async def project_summary(callback: CallbackQuery):
+    request_id = int(callback.data.split(":")[1])
+    request, summary = get_project_summary(request_id, callback.from_user.id)
+
+    if not request:
+        await callback.answer("Проект не найден", show_alert=True)
+        return
+
+    await callback.message.answer(
+        project_summary_card(request, summary),
+        reply_markup=business_menu_kb(show_owner_return=is_admin(callback.from_user.id))
+    )
     await callback.answer()
 
 
@@ -4193,6 +4530,140 @@ async def owner_user_mode(message: Message, state: FSMContext):
     )
 
 
+
+async def send_business_daily_digests(bot: Bot):
+    """Once per day at BUSINESS_DIGEST_HOUR Moscow time, send only new response counts."""
+    while True:
+        now = datetime.now(MSK_TZ)
+
+        if now.hour == BUSINESS_DIGEST_HOUR:
+            today_key = now.strftime("%Y-%m-%d")
+            conn = db()
+            businesses = conn.execute(
+                """
+                SELECT DISTINCT business_user_id
+                FROM responses
+                ORDER BY business_user_id
+                """
+            ).fetchall()
+            conn.close()
+
+            for b in businesses:
+                business_user_id = b["business_user_id"]
+
+                conn = db()
+                state = conn.execute(
+                    """
+                    SELECT last_response_id, last_sent_at
+                    FROM business_digest_state
+                    WHERE business_user_id=?
+                    """,
+                    (business_user_id,)
+                ).fetchone()
+
+                if state and (state["last_sent_at"] or "").startswith(today_key):
+                    conn.close()
+                    continue
+
+                last_response_id = state["last_response_id"] if state else 0
+
+                rows = conn.execute(
+                    """
+                    SELECT r.response_id, r.request_id, q.task, q.status AS request_status
+                    FROM responses r
+                    JOIN requests q ON q.request_id=r.request_id
+                    WHERE r.business_user_id=?
+                      AND r.response_id>?
+                    ORDER BY r.response_id
+                    """,
+                    (business_user_id, last_response_id)
+                ).fetchall()
+
+                if not rows:
+                    # Mark checked today without advancing response id.
+                    if state:
+                        conn.execute(
+                            """
+                            UPDATE business_digest_state
+                            SET last_sent_at=?
+                            WHERE business_user_id=?
+                            """,
+                            (now.isoformat(), business_user_id)
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            INSERT INTO business_digest_state
+                            (business_user_id, last_response_id, last_sent_at)
+                            VALUES (?, 0, ?)
+                            """,
+                            (business_user_id, now.isoformat())
+                        )
+                    conn.commit()
+                    conn.close()
+                    continue
+
+                by_request = {}
+                max_response_id = last_response_id
+                for row in rows:
+                    max_response_id = max(max_response_id, row["response_id"])
+                    item = by_request.setdefault(
+                        row["request_id"],
+                        {"task": row["task"], "count": 0}
+                    )
+                    item["count"] += 1
+
+                lines = []
+                for item in by_request.values():
+                    task = (item["task"] or "Проект").strip()
+                    if len(task) > 70:
+                        task = task[:67] + "..."
+                    lines.append(f"• {task} — <b>{item['count']}</b> новых")
+
+                text = (
+                    "<b>Новые отклики за день</b>\n\n"
+                    f"Сегодня у ваших проектов появилось: <b>{len(rows)}</b> новых откликов.\n\n"
+                    + "\n".join(lines)
+                    + "\n\nПосмотрите творцов и выберите подходящих."
+                )
+
+                try:
+                    await bot.send_message(
+                        business_user_id,
+                        text,
+                        reply_markup=business_digest_kb()
+                    )
+                except Exception:
+                    pass
+
+                if state:
+                    conn.execute(
+                        """
+                        UPDATE business_digest_state
+                        SET last_response_id=?, last_sent_at=?
+                        WHERE business_user_id=?
+                        """,
+                        (max_response_id, now.isoformat(), business_user_id)
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO business_digest_state
+                        (business_user_id, last_response_id, last_sent_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (business_user_id, max_response_id, now.isoformat())
+                    )
+                conn.commit()
+                conn.close()
+
+            # Prevent another run within the same hour.
+            await asyncio.sleep(3700)
+        else:
+            await asyncio.sleep(60)
+
+
+
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing. Add it to Railway Variables")
@@ -4204,7 +4675,11 @@ async def main():
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    await dp.start_polling(bot)
+    digest_task = asyncio.create_task(send_business_daily_digests(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        digest_task.cancel()
 
 
 if __name__ == "__main__":
