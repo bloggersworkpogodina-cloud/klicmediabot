@@ -522,6 +522,18 @@ REQUEST_SKILLS = [
 ]
 REQUEST_COOP = ["Оплата", "Бартер", "Оплата + бартер"]
 
+BLOGGER_REQUEST_NICHES = [
+    "Lifestyle", "Beauty", "Fashion", "Food", "Travel", "Семья и дети",
+    "Спорт", "Бизнес", "Психология", "Образование", "Авто", "Юмор", "Другое"
+]
+BLOGGER_REQUEST_PLATFORMS = ["Instagram", "Telegram", "VK", "YouTube", "TikTok", "Threads", "Другое"]
+BLOGGER_REQUEST_AD_FORMATS = [
+    "Stories", "Reels / Shorts", "Посты", "Обзоры / распаковки",
+    "Посещение заведений", "Мероприятия", "Амбассадорство", "Другое"
+]
+BLOGGER_REQUEST_COOP = ["Оплата", "Бартер", "Оплата + бартер", "% с продаж", "Амбассадорство"]
+
+
 
 
 def business_intro_kb():
@@ -536,7 +548,7 @@ def business_menu_kb(show_owner_return: bool = False):
     kb = InlineKeyboardBuilder()
     kb.button(text="Создать заявку", callback_data="business_create_request")
     kb.button(text="Мои заявки", callback_data="business_my_requests")
-    kb.button(text="Отклики креаторов", callback_data="business_responses")
+    kb.button(text="Отклики творцов", callback_data="business_responses")
     kb.button(text="Мой профиль", callback_data="business_profile")
     kb.button(text="Изменить профиль", callback_data="business_edit_profile")
     kb.button(text="Пригласить", callback_data="my_referral")
@@ -599,7 +611,7 @@ def owner_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🛡 Модерация"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="👥 Медиа-база"), KeyboardButton(text="🏢 Бизнесы")],
+            [KeyboardButton(text="👥 Творцы"), KeyboardButton(text="🏢 Бизнесы")],
             [KeyboardButton(text="📋 Все заявки"), KeyboardButton(text="💬 Все отклики")],
             [KeyboardButton(text="📥 Выгрузить Excel"), KeyboardButton(text="📣 Рассылка")],
             [KeyboardButton(text="🔗 Рефералы"), KeyboardButton(text="👤 Режим пользователя")],
@@ -701,7 +713,10 @@ class BroadcastForm(StatesGroup):
 
 
 class RequestForm(StatesGroup):
+    creator_needed = State()
     photo = State()
+
+    # Content-creator request
     content_types = State()
     task = State()
     content_quantity = State()
@@ -718,6 +733,22 @@ class RequestForm(StatesGroup):
     delivery_deadline = State()
     extra_info = State()
 
+    # Blogger request
+    blogger_geography = State()
+    blogger_niches = State()
+    blogger_platforms = State()
+    blogger_followers = State()
+    blogger_reach = State()
+    blogger_ad_formats = State()
+    blogger_work_format = State()
+    blogger_task = State()
+    blogger_cooperation = State()
+    blogger_budget_choice = State()
+    blogger_budget = State()
+    blogger_response_deadline = State()
+    blogger_publication_deadline = State()
+    blogger_extra = State()
+
 
 # =========================
 # Formatters
@@ -729,6 +760,22 @@ def request_card(r) -> str:
             return r[key] or fallback
         except Exception:
             return fallback
+
+    if val("creator_needed") == "Блогер":
+        return (
+            f"<b>ИЩЕМ БЛОГЕРА</b>\n\n"
+            f"<b>{val('business_name')}</b>\n"
+            f"📍 {val('city')}\n\n"
+            f"<b>Тематика:</b> {val('niche')}\n"
+            f"<b>Формат работы:</b> {val('work_format')}\n"
+            f"<b>Требования:</b> {val('requirements')}\n\n"
+            f"<b>Задача</b>\n{val('task')}\n\n"
+            f"<b>Условия:</b> {val('cooperation_format')}\n"
+            f"<b>Бюджет:</b> {val('budget', 'Обсуждается')}\n\n"
+            f"<b>Отклики до:</b> {val('response_deadline')}\n"
+            f"<b>Публикация / интеграция до:</b> {val('delivery_deadline')}\n"
+            + (f"\n<b>Дополнительно:</b> {val('extra_info')}\n" if val('extra_info') != "—" else "")
+        )
 
     return (
         f"<b>ИЩЕМ КОНТЕНТ-КРЕАТОРА</b>\n\n"
@@ -2149,28 +2196,365 @@ async def create_request_start(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.clear()
-    await state.set_state(RequestForm.photo)
+    await state.set_state(RequestForm.creator_needed)
     await callback.message.edit_text(
-        "<b>Новая заявка · поиск контент-креатора</b>\n\n"
-        "1. Добавьте <b>1 фото</b> для карточки проекта.\n\n"
-        "Это может быть товар, заведение, продукт или визуал бренда."
+        "<b>Новая заявка</b>\n\nКого вы ищете?",
+        reply_markup=single_choice_kb(
+            "req_need",
+            ["Блогера", "Контент-креатора"]
+        )
     )
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.creator_needed, F.data.startswith("req_need:"))
+async def req_creator_needed(callback: CallbackQuery, state: FSMContext):
+    choice = ["Блогер", "Контент-креатор"][int(callback.data.split(":")[1])]
+    await state.update_data(creator_needed=choice)
+
+    if choice == "Контент-креатор":
+        await state.set_state(RequestForm.photo)
+        await callback.message.edit_text(
+            "<b>Новая заявка · поиск контент-креатора</b>\n\n"
+            "1. Добавьте <b>1 фото</b> для карточки проекта.\n\n"
+            "Это может быть товар, заведение, продукт или визуал бренда."
+        )
+    else:
+        await state.set_state(RequestForm.photo)
+        await callback.message.edit_text(
+            "<b>Новая заявка · поиск блогера</b>\n\n"
+            "1. Добавьте <b>1 фото</b> для карточки проекта.\n\n"
+            "Это может быть товар, заведение, продукт или визуал бренда."
+        )
     await callback.answer()
 
 
 @router.message(RequestForm.photo, F.photo)
 async def req_photo(message: Message, state: FSMContext):
-    await state.update_data(photo_file_id=message.photo[-1].file_id, content_types_selected=[])
-    await state.set_state(RequestForm.content_types)
-    await message.answer(
-        "2. <b>Какой контент вам нужен?</b>\nМожно выбрать несколько вариантов.",
-        reply_markup=multi_choice_kb("req_content", REQUEST_CONTENT_TYPES, [])
-    )
+    data = await state.get_data()
+    await state.update_data(photo_file_id=message.photo[-1].file_id)
+
+    if data.get("creator_needed") == "Блогер":
+        await state.set_state(RequestForm.blogger_geography)
+        await message.answer(
+            "2. <b>География блогера</b>\n\n"
+            "Например: Москва / Краснодарский край / вся Россия / неважно."
+        )
+    else:
+        await state.update_data(content_types_selected=[])
+        await state.set_state(RequestForm.content_types)
+        await message.answer(
+            "2. <b>Какой контент вам нужен?</b>\nМожно выбрать несколько вариантов.",
+            reply_markup=multi_choice_kb("req_content", REQUEST_CONTENT_TYPES, [])
+        )
 
 
 @router.message(RequestForm.photo)
 async def req_photo_invalid(message: Message):
     await message.answer("Пришлите, пожалуйста, одно фото для карточки заявки.")
+
+
+
+@router.message(RequestForm.blogger_geography)
+async def blogger_req_geography(message: Message, state: FSMContext):
+    await state.update_data(project_geography=message.text.strip(), blogger_niches_selected=[])
+    await state.set_state(RequestForm.blogger_niches)
+    await message.answer(
+        "3. <b>Тематика блога</b>\nМожно выбрать несколько вариантов.",
+        reply_markup=multi_choice_kb("blog_req_niche", BLOGGER_REQUEST_NICHES, [])
+    )
+
+
+@router.callback_query(RequestForm.blogger_niches, F.data.startswith("blog_req_niche:"))
+async def blogger_req_niches(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("blogger_niches_selected", []))
+
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(blogger_niches=", ".join(selected), blogger_platforms_selected=[])
+        await state.set_state(RequestForm.blogger_platforms)
+        await callback.message.edit_text(
+            "4. <b>На каких площадках нужен блогер?</b>\nМожно выбрать несколько вариантов.",
+            reply_markup=multi_choice_kb("blog_req_platform", BLOGGER_REQUEST_PLATFORMS, [])
+        )
+        await callback.answer()
+        return
+
+    option = BLOGGER_REQUEST_NICHES[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(blogger_niches_selected=selected)
+    await callback.message.edit_reply_markup(
+        reply_markup=multi_choice_kb("blog_req_niche", BLOGGER_REQUEST_NICHES, selected)
+    )
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.blogger_platforms, F.data.startswith("blog_req_platform:"))
+async def blogger_req_platforms(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("blogger_platforms_selected", []))
+
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(blogger_platforms=", ".join(selected))
+        await state.set_state(RequestForm.blogger_followers)
+        await callback.message.edit_text(
+            "5. <b>Минимальное количество подписчиков</b>\n\n"
+            "Напишите число или «неважно»."
+        )
+        await callback.answer()
+        return
+
+    option = BLOGGER_REQUEST_PLATFORMS[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(blogger_platforms_selected=selected)
+    await callback.message.edit_reply_markup(
+        reply_markup=multi_choice_kb("blog_req_platform", BLOGGER_REQUEST_PLATFORMS, selected)
+    )
+    await callback.answer()
+
+
+@router.message(RequestForm.blogger_followers)
+async def blogger_req_followers(message: Message, state: FSMContext):
+    await state.update_data(blogger_followers=message.text.strip())
+    await state.set_state(RequestForm.blogger_reach)
+    await message.answer(
+        "6. <b>Минимальный средний охват</b>\n\n"
+        "Напишите число или «неважно»."
+    )
+
+
+@router.message(RequestForm.blogger_reach)
+async def blogger_req_reach(message: Message, state: FSMContext):
+    await state.update_data(blogger_reach=message.text.strip(), blogger_ad_formats_selected=[])
+    await state.set_state(RequestForm.blogger_ad_formats)
+    await message.answer(
+        "7. <b>Какие рекламные форматы нужны?</b>\nМожно выбрать несколько вариантов.",
+        reply_markup=multi_choice_kb("blog_req_ad", BLOGGER_REQUEST_AD_FORMATS, [])
+    )
+
+
+@router.callback_query(RequestForm.blogger_ad_formats, F.data.startswith("blog_req_ad:"))
+async def blogger_req_ad_formats(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("blogger_ad_formats_selected", []))
+
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(blogger_ad_formats=", ".join(selected))
+        await state.set_state(RequestForm.blogger_work_format)
+        await callback.message.edit_text(
+            "8. <b>Формат сотрудничества по месту</b>",
+            reply_markup=single_choice_kb(
+                "blog_req_work",
+                ["Онлайн", "Оффлайн", "Онлайн + оффлайн"]
+            )
+        )
+        await callback.answer()
+        return
+
+    option = BLOGGER_REQUEST_AD_FORMATS[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(blogger_ad_formats_selected=selected)
+    await callback.message.edit_reply_markup(
+        reply_markup=multi_choice_kb("blog_req_ad", BLOGGER_REQUEST_AD_FORMATS, selected)
+    )
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.blogger_work_format, F.data.startswith("blog_req_work:"))
+async def blogger_req_work(callback: CallbackQuery, state: FSMContext):
+    choice = ["Онлайн", "Оффлайн", "Онлайн + оффлайн"][int(callback.data.split(":")[1])]
+    await state.update_data(work_format=choice)
+    await state.set_state(RequestForm.blogger_task)
+    await callback.message.edit_text(
+        "9. <b>Опишите задачу</b>\n\n"
+        "Что должен сделать блогер?"
+    )
+    await callback.answer()
+
+
+@router.message(RequestForm.blogger_task)
+async def blogger_req_task(message: Message, state: FSMContext):
+    await state.update_data(task=message.text.strip(), blogger_coop_selected=[])
+    await state.set_state(RequestForm.blogger_cooperation)
+    await message.answer(
+        "10. <b>Формат сотрудничества</b>\nМожно выбрать несколько вариантов.",
+        reply_markup=multi_choice_kb("blog_req_coop", BLOGGER_REQUEST_COOP, [])
+    )
+
+
+@router.callback_query(RequestForm.blogger_cooperation, F.data.startswith("blog_req_coop:"))
+async def blogger_req_coop(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("blogger_coop_selected", []))
+
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(cooperation_format=", ".join(selected))
+        await state.set_state(RequestForm.blogger_budget_choice)
+        await callback.message.edit_text(
+            "11. <b>Бюджет</b>",
+            reply_markup=single_choice_kb(
+                "blog_req_budget",
+                ["Указать бюджет", "Обсуждается"]
+            )
+        )
+        await callback.answer()
+        return
+
+    option = BLOGGER_REQUEST_COOP[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(blogger_coop_selected=selected)
+    await callback.message.edit_reply_markup(
+        reply_markup=multi_choice_kb("blog_req_coop", BLOGGER_REQUEST_COOP, selected)
+    )
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.blogger_budget_choice, F.data.startswith("blog_req_budget:"))
+async def blogger_req_budget_choice(callback: CallbackQuery, state: FSMContext):
+    choice = ["Указать бюджет", "Обсуждается"][int(callback.data.split(":")[1])]
+    if choice == "Указать бюджет":
+        await state.set_state(RequestForm.blogger_budget)
+        await callback.message.edit_text(
+            "Укажите сумму или диапазон.\nНапример: 15 000 ₽ или 10 000–20 000 ₽."
+        )
+    else:
+        await state.update_data(budget="Обсуждается")
+        await state.set_state(RequestForm.blogger_response_deadline)
+        await callback.message.edit_text(
+            "12. <b>До какого числа принимаете отклики?</b>\n"
+            "Напишите дату."
+        )
+    await callback.answer()
+
+
+@router.message(RequestForm.blogger_budget)
+async def blogger_req_budget(message: Message, state: FSMContext):
+    await state.update_data(budget=message.text.strip())
+    await state.set_state(RequestForm.blogger_response_deadline)
+    await message.answer(
+        "12. <b>До какого числа принимаете отклики?</b>\n"
+        "Напишите дату."
+    )
+
+
+@router.message(RequestForm.blogger_response_deadline)
+async def blogger_req_response_deadline(message: Message, state: FSMContext):
+    await state.update_data(response_deadline=message.text.strip())
+    await state.set_state(RequestForm.blogger_publication_deadline)
+    await message.answer(
+        "13. <b>Когда должна выйти публикация / интеграция?</b>\n"
+        "Напишите дату или срок."
+    )
+
+
+@router.message(RequestForm.blogger_publication_deadline)
+async def blogger_req_publication_deadline(message: Message, state: FSMContext):
+    await state.update_data(delivery_deadline=message.text.strip())
+    await state.set_state(RequestForm.blogger_extra)
+    await message.answer(
+        "14. <b>Дополнительная информация</b>\n\n"
+        "Напишите важные детали или отправьте «Пропустить»."
+    )
+
+
+@router.message(RequestForm.blogger_extra)
+async def blogger_req_extra(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    extra = message.text.strip()
+    if extra.lower() in {"пропустить", "-", "нет"}:
+        extra = None
+
+    conn = db()
+    profile = conn.execute(
+        "SELECT * FROM business_profiles WHERE user_id=?",
+        (message.from_user.id,)
+    ).fetchone()
+
+    row = conn.execute(
+        """
+        INSERT INTO requests
+        (
+            business_user_id, business_name, city, niche, task, creator_needed,
+            cooperation_format, budget, social_link, contact, photo_file_id,
+            work_format, requirements, response_deadline, delivery_deadline,
+            extra_info, status, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'Блогер', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        RETURNING request_id
+        """,
+        (
+            message.from_user.id,
+            profile["business_name"],
+            data.get("project_geography") or profile["city"],
+            data.get("blogger_niches"),
+            data["task"],
+            data.get("cooperation_format"),
+            data.get("budget"),
+            profile["social_link"],
+            profile["contact"],
+            data["photo_file_id"],
+            data.get("work_format"),
+            (
+                f"Площадки: {data.get('blogger_platforms', '—')}; "
+                f"Подписчики от: {data.get('blogger_followers', '—')}; "
+                f"Охват от: {data.get('blogger_reach', '—')}; "
+                f"Форматы: {data.get('blogger_ad_formats', '—')}"
+            ),
+            data.get("response_deadline"),
+            data.get("delivery_deadline"),
+            extra,
+            datetime.now().isoformat()
+        )
+    ).fetchone()
+    request_id = row["request_id"]
+    request = conn.execute(
+        "SELECT * FROM requests WHERE request_id=?",
+        (request_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    await state.clear()
+
+    await send_request_card(
+        message,
+        request,
+        reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id)),
+        prefix="<b>Заявка отправлена на модерацию.</b>\\nПосле одобрения она появится у блогеров."
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            if request["photo_file_id"]:
+                await bot.send_photo(
+                    admin_id,
+                    request["photo_file_id"],
+                    caption="<b>Новая заявка на модерацию</b>\\n\\n" + request_card(request),
+                    reply_markup=moderation_kb(request_id),
+                )
+            else:
+                await bot.send_message(
+                    admin_id,
+                    "<b>Новая заявка на модерацию</b>\\n\\n" + request_card(request),
+                    reply_markup=moderation_kb(request_id),
+                )
+        except Exception:
+            pass
 
 
 @router.callback_query(RequestForm.content_types, F.data.startswith("req_content:"))
@@ -2398,7 +2782,7 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
             creator_skills, product_provided, response_deadline, delivery_deadline,
             extra_info, status, created_at
         )
-        VALUES (?, ?, ?, ?, ?, 'Контент-креатор', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         RETURNING request_id
         """,
         (
@@ -2407,6 +2791,7 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
             data.get("project_geography") or profile["city"],
             profile["niche"],
             data["task"],
+            data.get("creator_needed", "Контент-креатор"),
             data["cooperation_format"],
             data["budget"],
             profile["social_link"],
@@ -2936,12 +3321,12 @@ def media_base_kb():
     return kb.as_markup()
 
 
-@router.message(F.text.in_({"👥 База креаторов", "👥 Медиа-база"}))
+@router.message(F.text.in_({"👥 Творцы", "👥 Творцы"}))
 async def owner_creators(message: Message):
     if not is_admin(message.from_user.id):
         return
     await message.answer(
-        "<b>Медиа-база КЛИК</b>\n\nКого показать?",
+        "<b>Творцы КЛИК</b>\n\nКого показать?",
         reply_markup=media_base_kb()
     )
 
