@@ -569,7 +569,7 @@ def business_menu_kb(show_owner_return: bool = False):
     kb.button(text="Мой профиль", callback_data="business_profile")
     kb.button(text="Изменить профиль", callback_data="business_edit_profile")
     kb.button(text="Пригласить", callback_data="my_referral")
-    kb.button(text="Помощь", callback_data="help_business")
+    kb.button(text="Задать вопрос", callback_data="support_start")
     if show_owner_return:
         kb.button(text="Вернуться в панель владельца", callback_data="owner_return")
     kb.adjust(1)
@@ -584,7 +584,7 @@ def creator_menu_kb():
     kb.button(text="Изменить профиль", callback_data="creator_edit_profile")
     kb.button(text="Пригласить", callback_data="my_referral")
     kb.button(text="Настройки", callback_data="creator_settings")
-    kb.button(text="Помощь", callback_data="help_creator")
+    kb.button(text="Задать вопрос", callback_data="support_start")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -625,6 +625,44 @@ def owner_user_mode_kb():
 
 
 
+
+def support_ticket_kb(ticket_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Ответить", callback_data=f"support_reply:{ticket_id}")
+    kb.button(text="Закрыть", callback_data=f"support_close:{ticket_id}")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def support_owner_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Новые", callback_data="support_list:new")
+    kb.button(text="Закрытые", callback_data="support_list:closed")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def get_user_role_label(user_id: int) -> str:
+    conn = db()
+    business = conn.execute(
+        "SELECT user_id FROM business_profiles WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+    if business:
+        conn.close()
+        return "Бизнес"
+
+    creator = conn.execute(
+        "SELECT creator_type FROM creators WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+    conn.close()
+
+    if creator:
+        return creator["creator_type"] or "Творец"
+    return "Пользователь"
+
+
 def profile_moderation_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="🏢 Заявки бизнесов", callback_data="profile_mod:business")
@@ -642,6 +680,55 @@ def profile_mod_decision_kb(kind: str, user_id: int):
     return kb.as_markup()
 
 
+
+def init_support_tables():
+    conn = db()
+    if USE_POSTGRES:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                ticket_id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                role TEXT,
+                status TEXT DEFAULT 'new',
+                created_at TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_messages (
+                message_id BIGSERIAL PRIMARY KEY,
+                ticket_id BIGINT NOT NULL,
+                sender_type TEXT NOT NULL,
+                sender_user_id BIGINT,
+                message_text TEXT NOT NULL,
+                created_at TEXT
+            )
+        """)
+    else:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role TEXT,
+                status TEXT DEFAULT 'new',
+                created_at TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_messages (
+                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                sender_type TEXT NOT NULL,
+                sender_user_id INTEGER,
+                message_text TEXT NOT NULL,
+                created_at TEXT
+            )
+        """)
+    conn.commit()
+    conn.close()
+
+
 def owner_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -649,7 +736,8 @@ def owner_reply_kb():
             [KeyboardButton(text="👥 Творцы"), KeyboardButton(text="🏢 Бизнесы")],
             [KeyboardButton(text="📋 Все заявки"), KeyboardButton(text="💬 Все отклики")],
             [KeyboardButton(text="📥 Выгрузить Excel"), KeyboardButton(text="📣 Рассылка")],
-            [KeyboardButton(text="🔗 Рефералы"), KeyboardButton(text="👤 Режим пользователя")],
+            [KeyboardButton(text="💬 Сообщения"), KeyboardButton(text="🔗 Рефералы")],
+            [KeyboardButton(text="👤 Режим пользователя")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -717,6 +805,14 @@ class ContentCreatorForm(StatesGroup):
     price = State()
     excluded_topics = State()
     contact = State()
+
+
+class SupportForm(StatesGroup):
+    question = State()
+
+
+class SupportReplyForm(StatesGroup):
+    reply = State()
 
 
 class AdminBusinessForm(StatesGroup):
@@ -1893,6 +1989,242 @@ async def owner_return(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
+
+
+# ---------- Support / Messages ----------
+
+@router.callback_query(F.data == "support_start")
+async def support_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(SupportForm.question)
+    await callback.message.answer(
+        "<b>Задать вопрос</b>\n\n"
+        "Напишите ваш вопрос одним сообщением."
+    )
+    await callback.answer()
+
+
+@router.message(SupportForm.question)
+async def support_question(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Напишите вопрос текстом одним сообщением.")
+        return
+
+    role = get_user_role_label(message.from_user.id)
+    now = datetime.now().isoformat()
+
+    conn = db()
+    row = conn.execute(
+        """
+        INSERT INTO support_tickets (user_id, role, status, created_at, updated_at)
+        VALUES (?, ?, 'new', ?, ?)
+        RETURNING ticket_id
+        """,
+        (message.from_user.id, role, now, now)
+    ).fetchone()
+    ticket_id = row["ticket_id"]
+
+    conn.execute(
+        """
+        INSERT INTO support_messages
+        (ticket_id, sender_type, sender_user_id, message_text, created_at)
+        VALUES (?, 'user', ?, ?, ?)
+        """,
+        (ticket_id, message.from_user.id, text, now)
+    )
+    conn.commit()
+    conn.close()
+    await state.clear()
+
+    await message.answer(
+        "<b>Вопрос отправлен ✅</b>\n\n"
+        "Команда КЛИК ответит вам в этом боте."
+    )
+
+    username = f"@{message.from_user.username}" if message.from_user.username else "username не указан"
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                "<b>Новое сообщение</b>\n\n"
+                f"От: {message.from_user.full_name}\n"
+                f"Роль: {role}\n"
+                f"{username}\n\n"
+                f"{text}",
+                reply_markup=support_ticket_kb(ticket_id)
+            )
+        except Exception:
+            pass
+
+
+@router.message(F.text == "💬 Сообщения")
+async def support_owner_menu(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    conn = db()
+    new_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM support_tickets WHERE status='new'"
+    ).fetchone()["c"]
+    closed_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM support_tickets WHERE status='closed'"
+    ).fetchone()["c"]
+    conn.close()
+
+    await message.answer(
+        "<b>Сообщения</b>\n\n"
+        f"Новых: <b>{new_count}</b>\n"
+        f"Закрытых: {closed_count}",
+        reply_markup=support_owner_menu_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("support_list:"))
+async def support_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    status = callback.data.split(":", 1)[1]
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT t.ticket_id, t.user_id, t.role, t.status, t.created_at,
+               m.message_text
+        FROM support_tickets t
+        JOIN support_messages m ON m.message_id = (
+            SELECT sm.message_id
+            FROM support_messages sm
+            WHERE sm.ticket_id = t.ticket_id
+            ORDER BY sm.message_id ASC
+            LIMIT 1
+        )
+        WHERE t.status=?
+        ORDER BY t.ticket_id ASC
+        LIMIT 30
+        """,
+        (status,)
+    ).fetchall()
+    conn.close()
+
+    await callback.answer()
+
+    if not rows:
+        await callback.message.answer("Здесь пока нет сообщений.")
+        return
+
+    title = "Новые сообщения" if status == "new" else "Закрытые сообщения"
+    await callback.message.answer(f"<b>{title}</b>")
+
+    for row in rows:
+        await callback.message.answer(
+            f"<b>Обращение #{row['ticket_id']}</b>\n"
+            f"Роль: {row['role'] or '—'}\n\n"
+            f"{row['message_text']}",
+            reply_markup=support_ticket_kb(row["ticket_id"]) if status == "new" else None
+        )
+
+
+@router.callback_query(F.data.startswith("support_reply:"))
+async def support_reply_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+
+    ticket_id = int(callback.data.split(":")[1])
+
+    conn = db()
+    ticket = conn.execute(
+        "SELECT * FROM support_tickets WHERE ticket_id=?",
+        (ticket_id,)
+    ).fetchone()
+    conn.close()
+
+    if not ticket:
+        await callback.answer("Обращение не найдено", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(support_ticket_id=ticket_id)
+    await state.set_state(SupportReplyForm.reply)
+
+    await callback.message.answer(
+        f"<b>Ответ на обращение #{ticket_id}</b>\n\n"
+        "Напишите ответ одним сообщением."
+    )
+    await callback.answer()
+
+
+@router.message(SupportReplyForm.reply)
+async def support_reply_send(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Напишите ответ текстом.")
+        return
+
+    data = await state.get_data()
+    ticket_id = data.get("support_ticket_id")
+
+    conn = db()
+    ticket = conn.execute(
+        "SELECT * FROM support_tickets WHERE ticket_id=?",
+        (ticket_id,)
+    ).fetchone()
+
+    if not ticket:
+        conn.close()
+        await state.clear()
+        await message.answer("Обращение не найдено.")
+        return
+
+    now = datetime.now().isoformat()
+    conn.execute(
+        """
+        INSERT INTO support_messages
+        (ticket_id, sender_type, sender_user_id, message_text, created_at)
+        VALUES (?, 'admin', ?, ?, ?)
+        """,
+        (ticket_id, message.from_user.id, text, now)
+    )
+    conn.execute(
+        "UPDATE support_tickets SET updated_at=? WHERE ticket_id=?",
+        (now, ticket_id)
+    )
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+
+    try:
+        await bot.send_message(
+            ticket["user_id"],
+            "<b>Ответ команды КЛИК</b>\n\n" + text
+        )
+        await message.answer("Ответ отправлен ✅")
+    except Exception:
+        await message.answer("Не удалось отправить ответ пользователю.")
+
+
+@router.callback_query(F.data.startswith("support_close:"))
+async def support_close(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    ticket_id = int(callback.data.split(":")[1])
+    conn = db()
+    conn.execute(
+        "UPDATE support_tickets SET status='closed', updated_at=? WHERE ticket_id=?",
+        (datetime.now().isoformat(), ticket_id)
+    )
+    conn.commit()
+    conn.close()
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Обращение закрыто")
 
 
 # ---------- Profile moderation ----------
