@@ -532,7 +532,7 @@ def business_intro_kb():
     return kb.as_markup()
 
 
-def business_menu_kb():
+def business_menu_kb(show_owner_return: bool = False):
     kb = InlineKeyboardBuilder()
     kb.button(text="Создать заявку", callback_data="business_create_request")
     kb.button(text="Мои заявки", callback_data="business_my_requests")
@@ -541,6 +541,8 @@ def business_menu_kb():
     kb.button(text="Изменить профиль", callback_data="business_edit_profile")
     kb.button(text="Пригласить", callback_data="my_referral")
     kb.button(text="Помощь", callback_data="help_business")
+    if show_owner_return:
+        kb.button(text="Вернуться в панель владельца", callback_data="owner_return")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -578,6 +580,17 @@ def admin_kb():
     kb.button(text="Статистика", callback_data="admin_stats")
     kb.button(text="Все заявки", callback_data="admin_requests")
     kb.button(text="Выгрузить Excel", callback_data="admin_export")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+
+def owner_user_mode_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Я блогер", callback_data="owner_mode_blogger")
+    kb.button(text="Я контент-креатор", callback_data="owner_mode_content")
+    kb.button(text="Я бизнес", callback_data="owner_mode_business")
+    kb.button(text="Вернуться в панель владельца", callback_data="owner_return")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -970,7 +983,7 @@ async def business_contact(message: Message, state: FSMContext):
     await message.answer(
         "<b>Готово. Ваш профиль создан.</b>\n\n"
         "Теперь можно разместить первую заявку и начать получать отклики креаторов.",
-        reply_markup=business_menu_kb()
+        reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id))
     )
 
 
@@ -1713,6 +1726,83 @@ async def creator_contact(message: Message, state: FSMContext):
         reply_markup=creator_menu_kb()
     )
 
+
+
+
+@router.callback_query(F.data == "owner_mode_blogger")
+async def owner_mode_blogger(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    await state.update_data(owner_test_mode=True, creator_type="Блогер")
+    await state.set_state(CreatorForm.name)
+    await callback.message.edit_text(
+        "<b>Режим блогера</b>\n\n"
+        "Вы проходите обычный сценарий блогера как тестовый пользователь.\n\n"
+        "1. Как вас зовут?"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "owner_mode_content")
+async def owner_mode_content(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    await state.update_data(owner_test_mode=True, creator_type="Контент-креатор")
+    await state.set_state(ContentCreatorForm.name)
+    await callback.message.edit_text(
+        "<b>Режим контент-креатора</b>\n\n"
+        "Вы проходите обычный сценарий контент-креатора как тестовый пользователь.\n\n"
+        "1. Как вас зовут?"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "owner_mode_business")
+async def owner_mode_business(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+
+    conn = db()
+    profile = conn.execute(
+        "SELECT * FROM business_profiles WHERE user_id=?",
+        (callback.from_user.id,)
+    ).fetchone()
+    conn.close()
+
+    if profile:
+        await callback.message.edit_text(
+            "<b>Режим бизнеса</b>\n\n"
+            "Вы вошли в обычный кабинет бизнеса.",
+            reply_markup=business_menu_kb(show_owner_return=True)
+        )
+    else:
+        await state.update_data(owner_test_mode=True)
+        await state.set_state(BusinessForm.business_name)
+        await callback.message.edit_text(
+            "<b>Режим бизнеса</b>\n\n"
+            "У вас ещё нет профиля бизнеса. Создадим его один раз.\n\n"
+            "Введите название бизнеса:"
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "owner_return")
+async def owner_return(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    await callback.message.edit_text(
+        "<b>КЛИК | Панель владельца</b>\n\n"
+        "Вы вернулись в панель владельца."
+    )
+    await callback.message.answer(
+        "Панель владельца КЛИК",
+        reply_markup=owner_reply_kb()
+    )
+    await callback.answer()
 
 
 # ---------- Owner businesses ----------
