@@ -512,18 +512,11 @@ def admin_business_card_kb(business_id: int):
     return kb.as_markup()
 
 
-def form_cancel_reply_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Отмена")]],
-        resize_keyboard=True
-    )
-
-
 def single_choice_kb(prefix: str, options: list[str]):
     kb = InlineKeyboardBuilder()
     for i, option in enumerate(options):
         kb.button(text=option, callback_data=f"{prefix}:{i}")
-    kb.button(text="Отмена", callback_data="form_cancel")
+    kb.button(text="← Исправить ответ", callback_data="fix_previous_answer")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -534,7 +527,7 @@ def multi_choice_kb(prefix: str, options: list[str], selected: list[str]):
         mark = "✓ " if option in selected else ""
         kb.button(text=f"{mark}{option}", callback_data=f"{prefix}:{i}")
     kb.button(text="Готово", callback_data=f"{prefix}:done")
-    kb.button(text="Отмена", callback_data="form_cancel")
+    kb.button(text="← Исправить ответ", callback_data="fix_previous_answer")
     kb.adjust(2)
     return kb.as_markup()
 
@@ -592,7 +585,7 @@ def business_country_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Россия", callback_data="business_country:ru")
     kb.button(text="Другая страна", callback_data="business_country:other")
-    kb.button(text="Отмена", callback_data="form_cancel")
+    kb.button(text="← Исправить ответ", callback_data="fix_previous_answer")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -602,7 +595,7 @@ def business_work_format_kb():
     kb.button(text="Онлайн", callback_data="business_work:online")
     kb.button(text="Оффлайн", callback_data="business_work:offline")
     kb.button(text="Онлайн и оффлайн", callback_data="business_work:both")
-    kb.button(text="Отмена", callback_data="form_cancel")
+    kb.button(text="← Исправить ответ", callback_data="fix_previous_answer")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -1375,7 +1368,6 @@ async def role_business_intro(callback: CallbackQuery, state: FSMContext):
 async def role_business(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(BusinessForm.business_name)
-    await callback.message.answer("Можно отменить заполнение в любой момент.", reply_markup=form_cancel_reply_kb())
     await callback.message.edit_text("<b>Создаём профиль бизнеса</b>\n\nВведите название бизнеса:")
     await callback.answer()
 
@@ -1508,7 +1500,6 @@ async def role_creator_intro(callback: CallbackQuery, state: FSMContext):
 async def content_creator_start(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(ContentCreatorForm.name)
-    await callback.message.answer("Можно отменить заполнение в любой момент.", reply_markup=form_cancel_reply_kb())
     await callback.message.edit_text(
         "<b>Создаём профиль контент-креатора</b>\n\n1. Как вас зовут?"
     )
@@ -1864,7 +1855,6 @@ async def role_creator(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(creator_type="Блогер")
     await state.set_state(CreatorForm.name)
-    await callback.message.answer("Можно отменить заполнение в любой момент.", reply_markup=form_cancel_reply_kb())
     await callback.message.edit_text("<b>Создаём профиль блогера</b>\n\n1. Как вас зовут?")
     await callback.answer()
 
@@ -2241,7 +2231,6 @@ async def owner_mode_blogger(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(owner_test_mode=True, creator_type="Блогер")
     await state.set_state(CreatorForm.name)
-    await callback.message.answer("Можно отменить заполнение в любой момент.", reply_markup=form_cancel_reply_kb())
     await callback.message.edit_text(
         "<b>Режим блогера</b>\n\n"
         "<b>Перед началом</b>\n\n"
@@ -2259,7 +2248,6 @@ async def owner_mode_content(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(owner_test_mode=True, creator_type="Контент-креатор")
     await state.set_state(ContentCreatorForm.name)
-    await callback.message.answer("Можно отменить заполнение в любой момент.", reply_markup=form_cancel_reply_kb())
     await callback.message.edit_text(
         "<b>Режим контент-креатора</b>\n\n"
         "<b>Перед началом</b>\n\n"
@@ -3088,48 +3076,80 @@ async def admin_request_budget(message: Message, state: FSMContext):
         reply_markup=owner_reply_kb()
     )
 
-@router.callback_query(F.data == "form_cancel")
-async def cancel_any_form_callback(callback: CallbackQuery, state: FSMContext):
-    if not await state.get_state():
-        await callback.answer()
-        return
-    data = await state.get_data()
-    owner_mode = bool(data.get("owner_test_mode"))
-    await state.clear()
+FORM_BACK_MAP = {
+    "BusinessForm": {
+        "country_choice": "business_name", "region": "country_choice", "city": "region",
+        "work_format": "city", "niche": "work_format", "social_link": "niche", "contact": "social_link",
+    },
+    "CreatorForm": {
+        "photo": "name", "country": "photo", "country_other": "country", "region": "country",
+        "city": "region", "work_format": "city", "travel_scope": "work_format", "niche": "travel_scope",
+        "blog1_platform": "niche", "blog1_link": "blog1_platform", "blog1_followers": "blog1_link",
+        "blog1_reach": "blog1_followers", "add_blog2": "blog1_reach", "blog2_platform": "add_blog2",
+        "blog2_link": "blog2_platform", "blog2_followers": "blog2_link", "blog2_reach": "blog2_followers",
+        "ad_formats": "blog2_reach", "cooperation_formats": "ad_formats", "price_choice": "cooperation_formats",
+        "price": "price_choice", "excluded_topics": "price", "brief_ready": "excluded_topics", "contact": "brief_ready",
+    },
+    "ContentCreatorForm": {
+        "photo": "name", "country": "photo", "country_other": "country", "region": "country",
+        "city": "region", "work_format": "city", "travel_scope": "work_format", "content_types": "travel_scope",
+        "industries": "content_types", "on_camera": "industries", "skills": "on_camera",
+        "portfolio_link": "skills", "delivery_available": "portfolio_link",
+        "cooperation_formats": "delivery_available", "price_choice": "cooperation_formats",
+        "price": "price_choice", "excluded_topics": "price", "contact": "excluded_topics",
+    },
+}
 
-    if is_admin(callback.from_user.id) and owner_mode:
-        await callback.message.edit_text(
-            "Заполнение отменено. Данные не сохранены.",
-            reply_markup=owner_user_mode_kb()
-        )
+REQUEST_BACK_CONTENT = {
+    "photo": "creator_needed", "content_types": "photo", "task": "content_types",
+    "content_quantity": "task", "on_camera": "content_quantity", "work_format": "on_camera",
+    "geography": "work_format", "requirements": "geography", "creator_skills": "requirements",
+    "product_provided": "creator_skills", "cooperation_format": "product_provided",
+    "budget_choice": "cooperation_format", "budget": "budget_choice",
+    "response_deadline": "budget", "delivery_deadline": "response_deadline", "extra_info": "delivery_deadline",
+}
+
+REQUEST_BACK_BLOGGER = {
+    "photo": "creator_needed", "blogger_geography": "photo", "blogger_niches": "blogger_geography",
+    "blogger_platforms": "blogger_niches", "blogger_followers": "blogger_platforms",
+    "blogger_reach": "blogger_followers", "blogger_ad_formats": "blogger_reach",
+    "blogger_work_format": "blogger_ad_formats", "blogger_task": "blogger_work_format",
+    "blogger_cooperation": "blogger_task", "blogger_budget_choice": "blogger_cooperation",
+    "blogger_budget": "blogger_budget_choice", "blogger_response_deadline": "blogger_budget",
+    "blogger_publication_deadline": "blogger_response_deadline", "blogger_extra": "blogger_publication_deadline",
+}
+
+
+async def go_previous_form_state(state: FSMContext):
+    current = await state.get_state()
+    if not current or ":" not in current:
+        return None
+    group, current_name = current.split(":", 1)
+    if group == "RequestForm":
+        data = await state.get_data()
+        mapping = REQUEST_BACK_BLOGGER if data.get("creator_needed") == "Блогер" else REQUEST_BACK_CONTENT
     else:
-        conn = db()
-        business = conn.execute("SELECT user_id FROM business_profiles WHERE user_id=?", (callback.from_user.id,)).fetchone()
-        creator = conn.execute("SELECT user_id FROM creators WHERE user_id=?", (callback.from_user.id,)).fetchone()
-        conn.close()
-        markup = business_menu_kb(show_owner_return=is_admin(callback.from_user.id)) if business else creator_menu_kb() if creator else main_menu_kb()
-        await callback.message.edit_text("Заполнение отменено. Данные не сохранены.", reply_markup=markup)
-    await callback.answer("Отменено")
+        mapping = FORM_BACK_MAP.get(group, {})
+    previous = mapping.get(current_name)
+    if not previous:
+        return None
+    cls = globals().get(group)
+    if not cls:
+        return None
+    await state.set_state(getattr(cls, previous))
+    return previous
 
 
-@router.message(F.text.casefold() == "отмена")
-async def cancel_any_form_message(message: Message, state: FSMContext):
-    if not await state.get_state():
+@router.callback_query(F.data == "fix_previous_answer")
+async def fix_previous_answer(callback: CallbackQuery, state: FSMContext):
+    previous = await go_previous_form_state(state)
+    if not previous:
+        await callback.answer("Это первый вопрос анкеты.", show_alert=True)
         return
-    data = await state.get_data()
-    owner_mode = bool(data.get("owner_test_mode"))
-    await state.clear()
-
-    if is_admin(message.from_user.id) and owner_mode:
-        await message.answer("Заполнение отменено. Данные не сохранены.", reply_markup=owner_reply_kb())
-        return
-
-    conn = db()
-    business = conn.execute("SELECT user_id FROM business_profiles WHERE user_id=?", (message.from_user.id,)).fetchone()
-    creator = conn.execute("SELECT user_id FROM creators WHERE user_id=?", (message.from_user.id,)).fetchone()
-    conn.close()
-    markup = business_reply_kb() if business else creator_reply_kb() if creator else main_reply_kb()
-    await message.answer("Заполнение отменено. Данные не сохранены.", reply_markup=markup)
+    await callback.message.answer(
+        "← Вернулись на предыдущий вопрос. Введите или выберите ответ заново."
+    )
+    await callback.answer()
 
 
 # ---------- Profile editing ----------
@@ -3173,7 +3193,6 @@ async def creator_edit_profile(callback: CallbackQuery, state: FSMContext):
 async def business_edit_profile(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(BusinessForm.business_name)
-    await callback.message.answer("Можно отменить заполнение в любой момент.", reply_markup=form_cancel_reply_kb())
     await callback.message.edit_text(
         "<b>Редактирование профиля бизнеса</b>\n\n"
         "Пройдите анкету заново — новые ответы заменят старые.\n\n"
@@ -3202,7 +3221,6 @@ async def create_request_start(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await state.set_state(RequestForm.creator_needed)
-    await callback.message.answer("Можно отменить заполнение в любой момент.", reply_markup=form_cancel_reply_kb())
     await callback.message.edit_text(
         "<b>Новая заявка</b>\n\nКого вы ищете?",
         reply_markup=single_choice_kb(
