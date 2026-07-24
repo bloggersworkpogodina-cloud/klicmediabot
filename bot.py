@@ -579,6 +579,23 @@ BLOGGER_REQUEST_COOP = ["Оплата", "Бартер", "Оплата + барт
 
 
 
+def business_country_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Россия", callback_data="business_country:ru")
+    kb.button(text="Другая страна", callback_data="business_country:other")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def business_work_format_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Онлайн", callback_data="business_work:online")
+    kb.button(text="Оффлайн", callback_data="business_work:offline")
+    kb.button(text="Онлайн и оффлайн", callback_data="business_work:both")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def business_intro_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Создать профиль", callback_data="business_register")
@@ -920,7 +937,10 @@ class AdminRequestForm(StatesGroup):
 
 class BusinessForm(StatesGroup):
     business_name = State()
+    country_choice = State()
+    region = State()
     city = State()
+    work_format = State()
     niche = State()
     social_link = State()
     contact = State()
@@ -1351,15 +1371,68 @@ async def role_business(callback: CallbackQuery, state: FSMContext):
 @router.message(BusinessForm.business_name)
 async def business_name(message: Message, state: FSMContext):
     await state.update_data(business_name=message.text)
+    await state.set_state(BusinessForm.country_choice)
+    await message.answer(
+        "<b>Где вы находитесь?</b>",
+        reply_markup=business_country_kb()
+    )
+
+
+@router.callback_query(BusinessForm.country_choice, F.data.startswith("business_country:"))
+async def business_country(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+    if choice == "ru":
+        await state.update_data(country="Россия")
+        await state.set_state(BusinessForm.region)
+        await callback.message.edit_text("Укажите регион:")
+    else:
+        await state.update_data(country="Другая страна", region="")
+        await state.set_state(BusinessForm.city)
+        await callback.message.edit_text("Укажите страну и город:")
+    await callback.answer()
+
+
+@router.message(BusinessForm.region)
+async def business_region(message: Message, state: FSMContext):
+    await state.update_data(region=message.text.strip())
     await state.set_state(BusinessForm.city)
-    await message.answer("Город / онлайн:")
+    await message.answer("Укажите город:")
 
 
 @router.message(BusinessForm.city)
 async def business_city(message: Message, state: FSMContext):
-    await state.update_data(city=message.text)
+    await state.update_data(city_raw=message.text.strip())
+    await state.set_state(BusinessForm.work_format)
+    await message.answer(
+        "<b>Как вы работаете?</b>",
+        reply_markup=business_work_format_kb()
+    )
+
+
+@router.callback_query(BusinessForm.work_format, F.data.startswith("business_work:"))
+async def business_work_format(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":", 1)[1]
+    labels = {
+        "online": "Онлайн",
+        "offline": "Оффлайн",
+        "both": "Онлайн и оффлайн",
+    }
+    data = await state.get_data()
+    country = data.get("country", "")
+    region = data.get("region", "")
+    city = data.get("city_raw", "")
+    work_format = labels[value]
+
+    # Keep current DB schema intact: all profile geography remains in the existing city field.
+    if country == "Россия":
+        geo = ", ".join(x for x in [country, region, city] if x)
+    else:
+        geo = city
+    await state.update_data(city=f"{geo} | {work_format}")
+
     await state.set_state(BusinessForm.niche)
-    await message.answer("Ниша бизнеса:")
+    await callback.message.edit_text("Ниша бизнеса:")
+    await callback.answer()
 
 
 @router.message(BusinessForm.niche)
