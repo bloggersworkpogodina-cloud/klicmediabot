@@ -4682,7 +4682,7 @@ async def owner_user_mode(message: Message, state: FSMContext):
         return
     await state.clear()
     await message.answer(
-        "<b>Тестовый режим пользователя</b>\n\nВыберите роль, которую хотите проверить:",
+        "<b>Режим пользователя</b>\n\nВыберите роль, от имени которой хотите посмотреть бот:",
         reply_markup=main_menu_kb(),
     )
 
