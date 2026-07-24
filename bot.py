@@ -148,6 +148,17 @@ def init_db() -> None:
                 budget TEXT,
                 social_link TEXT,
                 contact TEXT,
+                photo_file_id TEXT,
+                content_types TEXT,
+                content_quantity TEXT,
+                on_camera TEXT,
+                work_format TEXT,
+                requirements TEXT,
+                creator_skills TEXT,
+                product_provided TEXT,
+                response_deadline TEXT,
+                delivery_deadline TEXT,
+                extra_info TEXT,
                 status TEXT DEFAULT 'pending',
                 created_at TEXT,
                 moderated_at TEXT,
@@ -186,6 +197,17 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS photo_file_id TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS content_types TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS content_quantity TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS on_camera TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS work_format TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS requirements TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS creator_skills TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS product_provided TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS response_deadline TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS delivery_deadline TEXT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS extra_info TEXT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_at TEXT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT")
@@ -257,6 +279,17 @@ def init_db() -> None:
                 budget TEXT,
                 social_link TEXT,
                 contact TEXT,
+                photo_file_id TEXT,
+                content_types TEXT,
+                content_quantity TEXT,
+                on_camera TEXT,
+                work_format TEXT,
+                requirements TEXT,
+                creator_skills TEXT,
+                product_provided TEXT,
+                response_deadline TEXT,
+                delivery_deadline TEXT,
+                extra_info TEXT,
                 status TEXT DEFAULT 'pending',
                 created_at TEXT,
                 moderated_at TEXT,
@@ -296,6 +329,15 @@ def init_db() -> None:
             )
             """
         )
+        request_columns = {r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()}
+        for column in [
+            "photo_file_id", "content_types", "content_quantity", "on_camera",
+            "work_format", "requirements", "creator_skills", "product_provided",
+            "response_deadline", "delivery_deadline", "extra_info"
+        ]:
+            if column not in request_columns:
+                conn.execute(f"ALTER TABLE requests ADD COLUMN {column} TEXT")
+
         user_columns = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "referred_by" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
@@ -470,6 +512,17 @@ CONTENT_SKILLS = [
 ]
 CONTENT_COOP_FORMATS = ["Оплата", "Бартер", "Оплата + бартер"]
 
+REQUEST_CONTENT_TYPES = [
+    "UGC-видео", "Reels / Shorts", "Фото", "Обзор / распаковка",
+    "Talking head", "Lifestyle-контент", "Предметная съёмка", "Другое"
+]
+REQUEST_SKILLS = [
+    "Разработать идею", "Написать сценарий", "Снять", "Смонтировать",
+    "Озвучить", "Добавить субтитры", "Полный цикл"
+]
+REQUEST_COOP = ["Оплата", "Бартер", "Оплата + бартер"]
+
+
 
 def business_intro_kb():
     kb = InlineKeyboardBuilder()
@@ -635,10 +688,22 @@ class BroadcastForm(StatesGroup):
 
 
 class RequestForm(StatesGroup):
-    creator_needed = State()
+    photo = State()
+    content_types = State()
     task = State()
+    content_quantity = State()
+    on_camera = State()
+    work_format = State()
+    geography = State()
+    requirements = State()
+    creator_skills = State()
+    product_provided = State()
     cooperation_format = State()
+    budget_choice = State()
     budget = State()
+    response_deadline = State()
+    delivery_deadline = State()
+    extra_info = State()
 
 
 # =========================
@@ -646,18 +711,44 @@ class RequestForm(StatesGroup):
 # =========================
 
 def request_card(r) -> str:
+    def val(key, fallback="—"):
+        try:
+            return r[key] or fallback
+        except Exception:
+            return fallback
+
     return (
-        f"<b>Заявка #{r['request_id']}</b>\n\n"
-        f"Бизнес: {r['business_name']}\n"
-        f"Город: {r['city']}\n"
-        f"Ниша: {r['niche']}\n"
-        f"Кого ищут: {r['creator_needed']}\n"
-        f"Задача: {r['task']}\n"
-        f"Формат: {r['cooperation_format']}\n"
-        f"Бюджет / бартер: {r['budget']}\n"
-        f"Соцсети: {r['social_link']}\n"
-        f"Статус: {r['status']}"
+        f"<b>ИЩЕМ КОНТЕНТ-КРЕАТОРА</b>\n\n"
+        f"<b>{val('business_name')}</b>\n"
+        f"📍 {val('city')}\n\n"
+        f"<b>Контент:</b> {val('content_types')}\n"
+        f"<b>Количество:</b> {val('content_quantity')}\n"
+        f"<b>В кадре:</b> {val('on_camera')}\n"
+        f"<b>Формат работы:</b> {val('work_format')}\n\n"
+        f"<b>Задача</b>\n{val('task')}\n\n"
+        f"<b>Что должен уметь креатор:</b> {val('creator_skills')}\n"
+        f"<b>Требования:</b> {val('requirements', 'Нет особых требований')}\n"
+        f"<b>Товар / услуга:</b> {val('product_provided')}\n\n"
+        f"<b>Условия:</b> {val('cooperation_format')}\n"
+        f"<b>Бюджет:</b> {val('budget', 'Обсуждается')}\n\n"
+        f"<b>Отклики до:</b> {val('response_deadline')}\n"
+        f"<b>Сдать контент до:</b> {val('delivery_deadline')}\n"
+        + (f"\n<b>Дополнительно:</b> {val('extra_info')}\n" if val('extra_info') != "—" else "")
     )
+
+
+async def send_request_card(message: Message, request, reply_markup=None, prefix: str | None = None):
+    text = request_card(request)
+    if prefix:
+        text = prefix + "\n\n" + text
+    try:
+        photo = request["photo_file_id"]
+    except Exception:
+        photo = None
+    if photo:
+        await message.answer_photo(photo, caption=text, reply_markup=reply_markup)
+    else:
+        await message.answer(text, reply_markup=reply_markup)
 
 
 def creator_card(c) -> str:
@@ -1947,80 +2038,330 @@ async def business_edit_profile(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "business_create_request")
 async def create_request_start(callback: CallbackQuery, state: FSMContext):
     conn = db()
-    profile = conn.execute("SELECT * FROM business_profiles WHERE user_id=?", (callback.from_user.id,)).fetchone()
+    profile = conn.execute(
+        "SELECT * FROM business_profiles WHERE user_id=?",
+        (callback.from_user.id,)
+    ).fetchone()
     conn.close()
     if not profile:
-        await callback.message.edit_text("Сначала заполните профиль бизнеса.", reply_markup=main_menu_kb())
+        await callback.message.edit_text(
+            "Сначала заполните профиль бизнеса.",
+            reply_markup=main_menu_kb()
+        )
         await callback.answer()
         return
-    await state.set_state(RequestForm.creator_needed)
-    await callback.message.edit_text("Кого ищем? Например: UGC-креатор, блогер, фотограф, видеограф")
+
+    await state.clear()
+    await state.set_state(RequestForm.photo)
+    await callback.message.edit_text(
+        "<b>Новая заявка · поиск контент-креатора</b>\n\n"
+        "1. Добавьте <b>1 фото</b> для карточки проекта.\n\n"
+        "Это может быть товар, заведение, продукт или визуал бренда."
+    )
     await callback.answer()
 
 
-@router.message(RequestForm.creator_needed)
-async def req_creator_needed(message: Message, state: FSMContext):
-    await state.update_data(creator_needed=message.text)
-    await state.set_state(RequestForm.task)
-    await message.answer("Что нужно сделать? Опишите задачу:")
+@router.message(RequestForm.photo, F.photo)
+async def req_photo(message: Message, state: FSMContext):
+    await state.update_data(photo_file_id=message.photo[-1].file_id, content_types_selected=[])
+    await state.set_state(RequestForm.content_types)
+    await message.answer(
+        "2. <b>Какой контент вам нужен?</b>\nМожно выбрать несколько вариантов.",
+        reply_markup=multi_choice_kb("req_content", REQUEST_CONTENT_TYPES, [])
+    )
+
+
+@router.message(RequestForm.photo)
+async def req_photo_invalid(message: Message):
+    await message.answer("Пришлите, пожалуйста, одно фото для карточки заявки.")
+
+
+@router.callback_query(RequestForm.content_types, F.data.startswith("req_content:"))
+async def req_content_types(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("content_types_selected", []))
+
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(content_types=", ".join(selected))
+        await state.set_state(RequestForm.task)
+        await callback.message.edit_text(
+            "3. <b>Опишите задачу</b>\n\n"
+            "Что именно нужно снять / создать?"
+        )
+        await callback.answer()
+        return
+
+    option = REQUEST_CONTENT_TYPES[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(content_types_selected=selected)
+    await callback.message.edit_reply_markup(
+        reply_markup=multi_choice_kb("req_content", REQUEST_CONTENT_TYPES, selected)
+    )
+    await callback.answer()
 
 
 @router.message(RequestForm.task)
 async def req_task(message: Message, state: FSMContext):
-    await state.update_data(task=message.text)
+    await state.update_data(task=message.text.strip())
+    await state.set_state(RequestForm.content_quantity)
+    await message.answer(
+        "4. <b>Сколько контента нужно?</b>\n\n"
+        "Например: 3 видео / 10 фото / 2 Reels + 5 Stories."
+    )
+
+
+@router.message(RequestForm.content_quantity)
+async def req_quantity(message: Message, state: FSMContext):
+    await state.update_data(content_quantity=message.text.strip())
+    await state.set_state(RequestForm.on_camera)
+    await message.answer(
+        "5. <b>Креатор должен сниматься в кадре?</b>",
+        reply_markup=single_choice_kb("req_camera", ["Да", "Нет", "Неважно"])
+    )
+
+
+@router.callback_query(RequestForm.on_camera, F.data.startswith("req_camera:"))
+async def req_camera(callback: CallbackQuery, state: FSMContext):
+    choice = ["Да", "Нет", "Неважно"][int(callback.data.split(":")[1])]
+    await state.update_data(on_camera=choice)
+    await state.set_state(RequestForm.work_format)
+    await callback.message.edit_text(
+        "6. <b>Какой формат работы?</b>",
+        reply_markup=single_choice_kb(
+            "req_work", ["Онлайн", "Оффлайн", "Онлайн + оффлайн"]
+        )
+    )
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.work_format, F.data.startswith("req_work:"))
+async def req_work(callback: CallbackQuery, state: FSMContext):
+    choice = ["Онлайн", "Оффлайн", "Онлайн + оффлайн"][int(callback.data.split(":")[1])]
+    await state.update_data(work_format=choice)
+    await state.set_state(RequestForm.geography)
+    await callback.message.edit_text(
+        "7. <b>География проекта / кого рассматриваете?</b>\n\n"
+        "Например: Москва / Санкт-Петербург и ЛО / вся Россия / любая страна."
+    )
+    await callback.answer()
+
+
+@router.message(RequestForm.geography)
+async def req_geography(message: Message, state: FSMContext):
+    await state.update_data(project_geography=message.text.strip())
+    await state.set_state(RequestForm.requirements)
+    await message.answer(
+        "8. <b>Есть ли требования к креатору?</b>\n\n"
+        "Возраст, пол, внешность, опыт, тематика портфолио и т. д.\n"
+        "Если требований нет — напишите «Нет»."
+    )
+
+
+@router.message(RequestForm.requirements)
+async def req_requirements(message: Message, state: FSMContext):
+    value = message.text.strip()
+    await state.update_data(
+        requirements="Нет особых требований" if value.lower() in {"нет", "нет требований"} else value,
+        req_skills_selected=[]
+    )
+    await state.set_state(RequestForm.creator_skills)
+    await message.answer(
+        "9. <b>Что должен сделать креатор?</b>\nМожно выбрать несколько вариантов.",
+        reply_markup=multi_choice_kb("req_skills", REQUEST_SKILLS, [])
+    )
+
+
+@router.callback_query(RequestForm.creator_skills, F.data.startswith("req_skills:"))
+async def req_skills(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = list(data.get("req_skills_selected", []))
+
+    if value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы один вариант", show_alert=True)
+            return
+        await state.update_data(creator_skills=", ".join(selected))
+        await state.set_state(RequestForm.product_provided)
+        await callback.message.edit_text(
+            "10. <b>Вы предоставляете товар / услугу для съёмки?</b>",
+            reply_markup=single_choice_kb(
+                "req_product",
+                ["Да, отправим товар", "Да, предоставим на месте", "Нет", "Не требуется"]
+            )
+        )
+        await callback.answer()
+        return
+
+    option = REQUEST_SKILLS[int(value)]
+    selected.remove(option) if option in selected else selected.append(option)
+    await state.update_data(req_skills_selected=selected)
+    await callback.message.edit_reply_markup(
+        reply_markup=multi_choice_kb("req_skills", REQUEST_SKILLS, selected)
+    )
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.product_provided, F.data.startswith("req_product:"))
+async def req_product(callback: CallbackQuery, state: FSMContext):
+    options = ["Да, отправим товар", "Да, предоставим на месте", "Нет", "Не требуется"]
+    await state.update_data(product_provided=options[int(callback.data.split(":")[1])])
     await state.set_state(RequestForm.cooperation_format)
-    await message.answer("Формат сотрудничества: оплата / бартер / процент / коллаборация / обсудим")
+    await callback.message.edit_text(
+        "11. <b>Формат сотрудничества</b>",
+        reply_markup=single_choice_kb("req_coop", REQUEST_COOP)
+    )
+    await callback.answer()
 
 
-@router.message(RequestForm.cooperation_format)
-async def req_format(message: Message, state: FSMContext):
-    await state.update_data(cooperation_format=message.text)
-    await state.set_state(RequestForm.budget)
-    await message.answer("Бюджет или что даёте по бартеру:")
+@router.callback_query(RequestForm.cooperation_format, F.data.startswith("req_coop:"))
+async def req_coop(callback: CallbackQuery, state: FSMContext):
+    choice = REQUEST_COOP[int(callback.data.split(":")[1])]
+    await state.update_data(cooperation_format=choice)
+    await state.set_state(RequestForm.budget_choice)
+    await callback.message.edit_text(
+        "12. <b>Бюджет</b>",
+        reply_markup=single_choice_kb("req_budget_choice", ["Указать бюджет", "Обсуждается"])
+    )
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.budget_choice, F.data.startswith("req_budget_choice:"))
+async def req_budget_choice(callback: CallbackQuery, state: FSMContext):
+    choice = ["Указать бюджет", "Обсуждается"][int(callback.data.split(":")[1])]
+    if choice == "Указать бюджет":
+        await state.set_state(RequestForm.budget)
+        await callback.message.edit_text(
+            "Укажите сумму или диапазон.\nНапример: 12 000 ₽ или 10 000–15 000 ₽."
+        )
+    else:
+        await state.update_data(budget="Обсуждается")
+        await state.set_state(RequestForm.response_deadline)
+        await callback.message.edit_text(
+            "13. <b>До какого числа принимаете отклики?</b>\n"
+            "Напишите дату, например: 30 июля."
+        )
+    await callback.answer()
 
 
 @router.message(RequestForm.budget)
-async def req_budget(message: Message, state: FSMContext, bot: Bot):
+async def req_budget(message: Message, state: FSMContext):
+    await state.update_data(budget=message.text.strip())
+    await state.set_state(RequestForm.response_deadline)
+    await message.answer(
+        "13. <b>До какого числа принимаете отклики?</b>\n"
+        "Напишите дату, например: 30 июля."
+    )
+
+
+@router.message(RequestForm.response_deadline)
+async def req_response_deadline(message: Message, state: FSMContext):
+    await state.update_data(response_deadline=message.text.strip())
+    await state.set_state(RequestForm.delivery_deadline)
+    await message.answer(
+        "14. <b>Когда нужно сдать готовый контент?</b>\n"
+        "Напишите дату или срок."
+    )
+
+
+@router.message(RequestForm.delivery_deadline)
+async def req_delivery_deadline(message: Message, state: FSMContext):
+    await state.update_data(delivery_deadline=message.text.strip())
+    await state.set_state(RequestForm.extra_info)
+    await message.answer(
+        "15. <b>Дополнительная информация</b>\n\n"
+        "Напишите важные детали или отправьте «Пропустить»."
+    )
+
+
+@router.message(RequestForm.extra_info)
+async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
+    extra = message.text.strip()
+    if extra.lower() in {"пропустить", "-", "нет"}:
+        extra = None
+
     conn = db()
-    profile = conn.execute("SELECT * FROM business_profiles WHERE user_id=?", (message.from_user.id,)).fetchone()
+    profile = conn.execute(
+        "SELECT * FROM business_profiles WHERE user_id=?",
+        (message.from_user.id,)
+    ).fetchone()
+
     row = conn.execute(
         """
         INSERT INTO requests
-        (business_user_id, business_name, city, niche, task, creator_needed, cooperation_format, budget, social_link, contact, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        (
+            business_user_id, business_name, city, niche, task, creator_needed,
+            cooperation_format, budget, social_link, contact, photo_file_id,
+            content_types, content_quantity, on_camera, work_format, requirements,
+            creator_skills, product_provided, response_deadline, delivery_deadline,
+            extra_info, status, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'Контент-креатор', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         RETURNING request_id
         """,
         (
-            message.from_user.id, profile["business_name"], profile["city"], profile["niche"],
-            data["task"], data["creator_needed"], data["cooperation_format"], message.text,
-            profile["social_link"], profile["contact"], datetime.now().isoformat()
+            message.from_user.id,
+            profile["business_name"],
+            data.get("project_geography") or profile["city"],
+            profile["niche"],
+            data["task"],
+            data["cooperation_format"],
+            data["budget"],
+            profile["social_link"],
+            profile["contact"],
+            data["photo_file_id"],
+            data["content_types"],
+            data["content_quantity"],
+            data["on_camera"],
+            data["work_format"],
+            data["requirements"],
+            data["creator_skills"],
+            data["product_provided"],
+            data["response_deadline"],
+            data["delivery_deadline"],
+            extra,
+            datetime.now().isoformat()
         )
     ).fetchone()
     request_id = row["request_id"]
-    request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
+    request = conn.execute(
+        "SELECT * FROM requests WHERE request_id=?",
+        (request_id,)
+    ).fetchone()
     conn.commit()
     conn.close()
-
     await state.clear()
-    await message.answer(
-        "<b>Заявка отправлена на модерацию.</b>\n\n"
-        "После одобрения она появится у креаторов.",
+
+    await send_request_card(
+        message,
+        request,
         reply_markup=business_menu_kb(),
+        prefix="<b>Заявка отправлена на модерацию.</b>\\nПосле одобрения она появится у контент-креаторов."
     )
 
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(
+            await bot.send_photo(
                 admin_id,
-                "<b>Новая заявка на модерацию</b>\n\n" + request_card(request),
+                request["photo_file_id"],
+                caption="<b>Новая заявка на модерацию</b>\\n\\n" + request_card(request),
                 reply_markup=moderation_kb(request_id),
             )
         except Exception:
-            pass
+            try:
+                await bot.send_message(
+                    admin_id,
+                    "<b>Новая заявка на модерацию</b>\\n\\n" + request_card(request),
+                    reply_markup=moderation_kb(request_id),
+                )
+            except Exception:
+                pass
 
-
-# ---------- Creator views/responds ----------
 
 @router.callback_query(F.data == "creator_view_requests")
 async def creator_view_requests(callback: CallbackQuery):
@@ -2033,7 +2374,7 @@ async def creator_view_requests(callback: CallbackQuery):
         return
     await callback.message.edit_text("Активные заявки:")
     for r in requests:
-        await callback.message.answer(request_card(r), reply_markup=request_kb(r["request_id"]))
+        await send_request_card(callback.message, r, reply_markup=request_kb(r["request_id"]))
     await callback.answer()
 
 
@@ -2325,23 +2666,34 @@ async def send_pending_requests(message: Message):
         return
     await message.answer(f"<b>На модерации: {len(rows)}</b>", reply_markup=owner_reply_kb())
     for r in rows:
-        await message.answer(request_card(r), reply_markup=moderation_kb(r["request_id"]))
+        await send_request_card(message, r, reply_markup=moderation_kb(r["request_id"]))
 
 
 async def broadcast_approved_request(bot: Bot, request_id: int):
     conn = db()
     request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
-    creators = conn.execute("SELECT * FROM creators WHERE status='active'").fetchall()
+    creators = conn.execute(
+        "SELECT * FROM creators WHERE status='active' AND creator_type=?",
+        (request["creator_needed"],)
+    ).fetchall() if request else []
     conn.close()
     if not request or request["status"] != "active":
         return
     for creator in creators:
         try:
-            await bot.send_message(
-                creator["user_id"],
-                "<b>Новая заявка</b>\n\n" + request_card(request),
-                reply_markup=request_kb(request_id),
-            )
+            if request["photo_file_id"]:
+                await bot.send_photo(
+                    creator["user_id"],
+                    request["photo_file_id"],
+                    caption="<b>Новая заявка</b>\n\n" + request_card(request),
+                    reply_markup=request_kb(request_id),
+                )
+            else:
+                await bot.send_message(
+                    creator["user_id"],
+                    "<b>Новая заявка</b>\n\n" + request_card(request),
+                    reply_markup=request_kb(request_id),
+                )
         except Exception:
             pass
 
@@ -2654,7 +3006,7 @@ def export_excel_bytes() -> bytes:
             "SELECT user_id, business_name, city, niche, social_link, contact FROM business_profiles ORDER BY user_id"
         ).fetchall(),
         "Заявки": conn.execute(
-            "SELECT request_id, business_user_id, business_name, city, niche, creator_needed, task, cooperation_format, budget, social_link, contact, status, created_at FROM requests ORDER BY request_id"
+            "SELECT request_id, business_user_id, business_name, city, niche, creator_needed, task, photo_file_id, content_types, content_quantity, on_camera, work_format, requirements, creator_skills, product_provided, cooperation_format, budget, response_deadline, delivery_deadline, extra_info, social_link, contact, status, created_at FROM requests ORDER BY request_id"
         ).fetchall(),
         "Отклики": conn.execute(
             "SELECT response_id, request_id, creator_user_id, business_user_id, status, created_at FROM responses ORDER BY response_id"
