@@ -2707,6 +2707,9 @@ async def profile_moderation_queue(callback: CallbackQuery):
         return
     kind = callback.data.split(":", 1)[1]
     await callback.answer()
+    if kind == "projects":
+        await send_pending_requests(callback.message)
+        return
     await show_next_profile_for_moderation(callback.message, kind)
 
 
@@ -3559,24 +3562,23 @@ async def blogger_req_extra(message: Message, state: FSMContext, bot: Bot):
         message,
         request,
         reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id)),
-        prefix="<b>Заявка отправлена на модерацию.</b>\\nПосле одобрения она появится у блогеров."
+        prefix="<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у блогеров."
     )
 
+    conn = db()
+    moderation_left = conn.execute(
+        "SELECT COUNT(*) AS c FROM requests WHERE status='pending'"
+    ).fetchone()["c"]
+    conn.close()
     for admin_id in ADMIN_IDS:
         try:
-            if request["photo_file_id"]:
-                await bot.send_photo(
-                    admin_id,
-                    request["photo_file_id"],
-                    caption="<b>Новая заявка на модерацию</b>\\n\\n" + request_card(request),
-                    reply_markup=moderation_kb(request_id),
-                )
-            else:
-                await bot.send_message(
-                    admin_id,
-                    "<b>Новая заявка на модерацию</b>\\n\\n" + request_card(request),
-                    reply_markup=moderation_kb(request_id),
-                )
+            await bot.send_message(
+                admin_id,
+                f"📋 <b>Новый проект на модерации</b>\nОсталось проверить: <b>{moderation_left}</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Открыть модерацию", callback_data="profile_mod:projects")]
+                ])
+            )
         except Exception:
             pass
 
@@ -3847,26 +3849,25 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
         message,
         request,
         reply_markup=business_menu_kb(),
-        prefix="<b>Заявка отправлена на модерацию.</b>\\nПосле одобрения она появится у контент-креаторов."
+        prefix="<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у контент-креаторов."
     )
 
+    conn = db()
+    moderation_left = conn.execute(
+        "SELECT COUNT(*) AS c FROM requests WHERE status='pending'"
+    ).fetchone()["c"]
+    conn.close()
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_photo(
+            await bot.send_message(
                 admin_id,
-                request["photo_file_id"],
-                caption="<b>Новая заявка на модерацию</b>\\n\\n" + request_card(request),
-                reply_markup=moderation_kb(request_id),
+                f"📋 <b>Новый проект на модерации</b>\nОсталось проверить: <b>{moderation_left}</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Открыть модерацию", callback_data="profile_mod:projects")]
+                ])
             )
         except Exception:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    "<b>Новая заявка на модерацию</b>\\n\\n" + request_card(request),
-                    reply_markup=moderation_kb(request_id),
-                )
-            except Exception:
-                pass
+            pass
 
 
 @router.callback_query(F.data == "creator_view_requests")
