@@ -853,6 +853,32 @@ def owner_reply_kb():
     )
 
 
+def owner_project_kb(request_id: int, status: str):
+    kb = InlineKeyboardBuilder()
+
+    if status == "pending":
+        kb.button(text="✅ Одобрить", callback_data=f"moderate_approve:{request_id}")
+        kb.button(text="❌ Отклонить", callback_data=f"moderate_reject:{request_id}")
+    elif status == "active":
+        kb.button(text="💬 Отклики", callback_data=f"owner_project_responses:{request_id}")
+        kb.button(text="🏁 Завершить", callback_data=f"owner_complete_project:{request_id}")
+    elif status == "completed":
+        kb.button(text="📊 Итоги", callback_data=f"owner_project_summary:{request_id}")
+        kb.button(text="💬 Отклики", callback_data=f"owner_project_responses:{request_id}")
+
+    kb.button(text="🗑 Удалить проект", callback_data=f"owner_delete_project:{request_id}")
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+
+def owner_delete_confirm_kb(request_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Да, удалить", callback_data=f"owner_delete_confirm:{request_id}")
+    kb.button(text="Не удалять", callback_data=f"owner_delete_cancel:{request_id}")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
 def moderation_kb(request_id: int):
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Одобрить", callback_data=f"moderate_approve:{request_id}")
@@ -4495,7 +4521,7 @@ async def owner_requests(message: Message):
     for r in rows:
         status = r["status"] or "pending"
         prefix = f"<b>{status_labels.get(status, status)}</b>"
-        markup = moderation_kb(r["request_id"]) if status == "pending" else None
+        markup = owner_project_kb(r["request_id"], status)
         await send_request_card(message, r, reply_markup=markup, prefix=prefix)
 
 
