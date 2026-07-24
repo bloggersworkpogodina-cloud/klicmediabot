@@ -4416,6 +4416,90 @@ async def admin_requests(callback: CallbackQuery):
     await callback.answer()
 
 
+
+@router.callback_query(F.data.startswith("owner_project_responses:"))
+async def owner_project_responses(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":")[1])
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT responses.*, creators.name, creators.creator_type
+        FROM responses
+        JOIN creators ON creators.user_id=responses.creator_user_id
+        WHERE responses.request_id=?
+        ORDER BY responses.response_id DESC
+        """,
+        (request_id,)
+    ).fetchall()
+    conn.close()
+    if not rows:
+        await callback.message.answer("У этого проекта пока нет откликов.")
+        await callback.answer()
+        return
+    await callback.message.answer(f"<b>Отклики на проект: {len(rows)}</b>")
+    for r in rows:
+        await callback.message.answer(
+            f"<b>{r['name'] or 'Творец'}</b>\n"
+            f"Роль: {r['creator_type'] or '—'}\n"
+            f"Статус отклика: {r['status'] or 'new'}"
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("owner_complete_project:"))
+async def owner_complete_project(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":")[1])
+    conn = db()
+    conn.execute(
+        "UPDATE requests SET status='completed', completed_at=? WHERE request_id=?",
+        (datetime.now(MSK_TZ).isoformat(), request_id)
+    )
+    conn.commit()
+    conn.close()
+    await callback.message.answer("Проект завершён. Итоги сохранены.")
+    await callback.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("owner_project_summary:"))
+async def owner_project_summary(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":")[1])
+    conn = db()
+    request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
+    counts = conn.execute(
+        """
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END) AS accepted,
+               SUM(CASE WHEN status='declined' THEN 1 ELSE 0 END) AS declined,
+               SUM(CASE WHEN status='new' THEN 1 ELSE 0 END) AS undecided
+        FROM responses WHERE request_id=?
+        """,
+        (request_id,)
+    ).fetchone()
+    conn.close()
+    if not request:
+        await callback.answer("Проект не найден", show_alert=True)
+        return
+    await callback.message.answer(
+        "<b>Итоги проекта</b>\n\n"
+        f"{request['business_name']}\n"
+        f"{request['task']}\n\n"
+        f"Всего откликов: <b>{counts['total'] or 0}</b>\n"
+        f"Принято: <b>{counts['accepted'] or 0}</b>\n"
+        f"Отклонено: {counts['declined'] or 0}\n"
+        f"Без решения: {counts['undecided'] or 0}"
+    )
+    await callback.answer()
+
+
 @router.message(F.text == "💬 Все отклики")
 async def owner_responses(message: Message):
     if not is_admin(message.from_user.id):
