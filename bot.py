@@ -730,9 +730,10 @@ def get_user_role_label(user_id: int) -> str:
 
 def profile_moderation_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🏢 Заявки бизнесов", callback_data="profile_mod:business")
-    kb.button(text="👤 Заявки блогеров", callback_data="profile_mod:blogger")
-    kb.button(text="🎬 Заявки контент-креаторов", callback_data="profile_mod:content")
+    kb.button(text="🏢 Регистрация бизнесов", callback_data="profile_mod:business")
+    kb.button(text="👤 Регистрация блогеров", callback_data="profile_mod:blogger")
+    kb.button(text="🎬 Регистрация контент-креаторов", callback_data="profile_mod:content")
+    kb.button(text="📋 Заявки бизнеса", callback_data="profile_mod:projects")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -860,6 +861,7 @@ def owner_project_kb(request_id: int, status: str):
         kb.button(text="✅ Одобрить", callback_data=f"moderate_approve:{request_id}")
         kb.button(text="❌ Отклонить", callback_data=f"moderate_reject:{request_id}")
     elif status == "active":
+        kb.button(text="📣 Отправить творцам по фильтру", callback_data=f"owner_filter_send:{request_id}")
         kb.button(text="💬 Отклики", callback_data=f"owner_project_responses:{request_id}")
         kb.button(text="🏁 Завершить", callback_data=f"owner_complete_project:{request_id}")
     elif status == "completed":
@@ -868,6 +870,14 @@ def owner_project_kb(request_id: int, status: str):
 
     kb.button(text="🗑 Удалить проект", callback_data=f"owner_delete_project:{request_id}")
     kb.adjust(2, 1)
+    return kb.as_markup()
+
+
+def owner_filter_send_confirm_kb(request_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, отправить", callback_data=f"owner_filter_send_confirm:{request_id}")
+    kb.button(text="❌ Нет", callback_data=f"owner_filter_send_cancel:{request_id}")
+    kb.adjust(2)
     return kb.as_markup()
 
 
@@ -1062,24 +1072,26 @@ def creator_matches_request_geo(creator, request) -> bool:
     return False
 
 
-async def notify_matching_creators(request):
+def matching_creators_for_request(request):
     conn = db()
-    creator_type = request["creator_needed"]
     rows = conn.execute(
         """
         SELECT * FROM creators
         WHERE creator_type=?
           AND COALESCE(status, 'pending')='active'
         """,
-        (creator_type,)
+        (request["creator_needed"],)
     ).fetchall()
     conn.close()
+    return [creator for creator in rows if creator_matches_request_geo(creator, request)]
+
+
+async def notify_matching_creators(request):
+    creator_type = request["creator_needed"]
+    rows = matching_creators_for_request(request)
 
     sent = 0
     for creator in rows:
-        if not creator_matches_request_geo(creator, request):
-            continue
-
         title = (
             "Новый проект для блогеров в КЛИК"
             if creator_type == "Блогер"
@@ -1503,7 +1515,7 @@ async def business_contact(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "<b>Готово. Анкета бизнеса отправлена на модерацию.</b>\n\n"
-        "Теперь можно разместить первую заявку и начать получать отклики креаторов.",
+        "После одобрения вам откроется создание проектов.",
         reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id))
     )
 
@@ -2595,14 +2607,7 @@ async def support_close(callback: CallbackQuery):
         (datetime.now().isoformat(), ticket_id)
     )
     conn.commit()
-    request_for_notify = conn.execute(
-        "SELECT * FROM requests WHERE request_id=?",
-        (request_id,)
-    ).fetchone() if 'request_id' in locals() else None
     conn.close()
-
-    if request_for_notify:
-        await notify_matching_creators(request_for_notify)
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer("Обращение закрыто")
@@ -2625,15 +2630,19 @@ async def profile_moderation_menu(message: Message):
     content = conn.execute(
         "SELECT COUNT(*) AS c FROM creators WHERE creator_type='Контент-креатор' AND COALESCE(status, 'pending')='pending'"
     ).fetchone()["c"]
+    projects = conn.execute(
+        "SELECT COUNT(*) AS c FROM requests WHERE status='pending'"
+    ).fetchone()["c"]
     conn.close()
 
-    total = businesses + bloggers + content
+    total = businesses + bloggers + content + projects
     await message.answer(
-        "<b>Модерация регистраций</b>\n\n"
-        f"Осталось: <b>{total}</b>\n\n"
-        f"Бизнесы — {businesses}\n"
-        f"Блогеры — {bloggers}\n"
-        f"Контент-креаторы — {content}",
+        "<b>Модерация</b>\n\n"
+        f"Всего осталось: <b>{total}</b>\n\n"
+        f"Регистрация бизнесов — {businesses}\n"
+        f"Регистрация блогеров — {bloggers}\n"
+        f"Регистрация контент-креаторов — {content}\n"
+        f"Заявки бизнеса — {projects}",
         reply_markup=profile_moderation_kb()
     )
 
@@ -2727,12 +2736,43 @@ async def show_next_profile_for_moderation(message: Message, kind: str):
             )
 
 
+async def show_next_project_for_moderation(message: Message):
+    conn = db()
+    row = conn.execute(
+        "SELECT * FROM requests WHERE status='pending' ORDER BY request_id ASC LIMIT 1"
+    ).fetchone()
+    remaining = conn.execute(
+        "SELECT COUNT(*) AS c FROM requests WHERE status='pending'"
+    ).fetchone()["c"]
+    conn.close()
+
+    if not row:
+        await message.answer(
+            "Заявок бизнеса на модерации больше нет ✅",
+            reply_markup=profile_moderation_kb()
+        )
+        return
+
+    await message.answer(
+        f"<b>Заявка бизнеса</b>\nОсталось: <b>{remaining}</b>"
+    )
+    await send_request_card(
+        message,
+        row,
+        reply_markup=moderation_kb(row["request_id"]),
+        prefix="<b>На модерации</b>"
+    )
+
+
 @router.callback_query(F.data.startswith("profile_mod:"))
 async def profile_moderation_queue(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
     kind = callback.data.split(":", 1)[1]
     await callback.answer()
+    if kind == "projects":
+        await show_next_project_for_moderation(callback.message)
+        return
     await show_next_profile_for_moderation(callback.message, kind)
 
 
@@ -3241,6 +3281,13 @@ async def create_request_start(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             "Сначала заполните профиль бизнеса.",
             reply_markup=main_menu_kb()
+        )
+        await callback.answer()
+        return
+
+    if (profile["status"] or "pending") != "active":
+        await callback.message.answer(
+            "Профиль бизнеса ещё проходит модерацию. Создание проектов откроется после одобрения."
         )
         await callback.answer()
         return
@@ -3896,7 +3943,7 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
 @router.callback_query(F.data == "creator_view_requests")
 async def creator_view_requests(callback: CallbackQuery):
     conn = db()
-    requests = conn.execute("SELECT * FROM requests WHERE status='pending' ORDER BY request_id DESC LIMIT 10").fetchall()
+    requests = conn.execute("SELECT * FROM requests WHERE status='active' ORDER BY request_id DESC LIMIT 10").fetchall()
     conn.close()
     if not requests:
         await callback.message.edit_text("Сейчас активных заявок нет.", reply_markup=creator_menu_kb())
@@ -3918,7 +3965,7 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
         await callback.answer("Сначала заполните анкету креатора", show_alert=True)
         return
 
-    request = conn.execute("SELECT * FROM requests WHERE request_id=? AND status='pending'", (request_id,)).fetchone()
+    request = conn.execute("SELECT * FROM requests WHERE request_id=? AND status='active'", (request_id,)).fetchone()
     if not request:
         conn.close()
         await callback.answer("Заявка уже не активна", show_alert=True)
@@ -4324,23 +4371,26 @@ async def moderate_approve(callback: CallbackQuery, bot: Bot):
         await callback.answer("Заявка уже обработана", show_alert=True)
         return
     conn.execute(
-        "UPDATE requests SET status='pending', moderated_at=?, moderated_by=? WHERE request_id=?",
+        "UPDATE requests SET status='active', moderated_at=?, moderated_by=? WHERE request_id=?",
         (datetime.now().isoformat(), callback.from_user.id, request_id),
     )
     conn.commit()
     conn.close()
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(f"✅ Заявка #{request_id} одобрена и опубликована.")
+    await callback.message.answer(
+        f"✅ Заявка #{request_id} одобрена. Проект появился в разделе «Проекты».\n"
+        "Рассылку творцам запускаете вы вручную из карточки проекта."
+    )
     try:
         await bot.send_message(
             request["business_user_id"],
-            f"✅ Ваша заявка #{request_id} прошла модерацию и опубликована.",
+            f"✅ Ваша заявка #{request_id} прошла модерацию и стала активным проектом.",
             reply_markup=business_menu_kb(),
         )
     except Exception:
         pass
-    await broadcast_approved_request(bot, request_id)
-    await callback.answer("Опубликовано")
+    await callback.answer("Одобрено")
+    await show_next_project_for_moderation(callback.message)
 
 
 @router.callback_query(F.data.startswith("moderate_reject:"))
@@ -4372,6 +4422,7 @@ async def moderate_reject(callback: CallbackQuery, bot: Bot):
     except Exception:
         pass
     await callback.answer("Отклонено")
+    await show_next_project_for_moderation(callback.message)
 
 
 async def stats_text() -> str:
@@ -4501,7 +4552,9 @@ async def owner_requests(message: Message):
     if not is_admin(message.from_user.id):
         return
     conn = db()
-    rows = conn.execute("SELECT * FROM requests ORDER BY request_id DESC LIMIT 30").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM requests WHERE status IN ('active','completed') ORDER BY request_id DESC LIMIT 30"
+    ).fetchall()
     conn.close()
     if not rows:
         await message.answer("Проектов пока нет.", reply_markup=owner_reply_kb())
@@ -4591,6 +4644,68 @@ async def owner_delete_cancel(callback: CallbackQuery):
         return
 
     await callback.message.edit_text("Удаление отменено.")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("owner_filter_send:"))
+async def owner_filter_send(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    request_id = int(callback.data.split(":")[1])
+    conn = db()
+    request = conn.execute(
+        "SELECT * FROM requests WHERE request_id=? AND status='active'",
+        (request_id,)
+    ).fetchone()
+    conn.close()
+
+    if not request:
+        await callback.answer("Проект не найден или уже не активен.", show_alert=True)
+        return
+
+    matched = matching_creators_for_request(request)
+    await callback.message.answer(
+        f"<b>Рассылка проекта #{request_id}</b>\\n\\n"
+        f"По фильтру найдено творцов: <b>{len(matched)}</b>.\\n"
+        "Отправить им проект?",
+        reply_markup=owner_filter_send_confirm_kb(request_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("owner_filter_send_confirm:"))
+async def owner_filter_send_confirm(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    request_id = int(callback.data.split(":")[1])
+    conn = db()
+    request = conn.execute(
+        "SELECT * FROM requests WHERE request_id=? AND status='active'",
+        (request_id,)
+    ).fetchone()
+    conn.close()
+
+    if not request:
+        await callback.answer("Проект не найден или уже не активен.", show_alert=True)
+        return
+
+    sent = await notify_matching_creators(request)
+    await callback.message.edit_text(
+        f"📣 Проект #{request_id} отправлен.\\nПолучили уведомление: <b>{sent}</b> творцов."
+    )
+    await callback.answer("Рассылка отправлена")
+
+
+@router.callback_query(F.data.startswith("owner_filter_send_cancel:"))
+async def owner_filter_send_cancel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.edit_text("Рассылка отменена.")
     await callback.answer()
 
 
