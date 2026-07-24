@@ -4535,6 +4535,65 @@ async def admin_requests(callback: CallbackQuery):
 
 
 
+@router.callback_query(F.data.startswith("owner_delete_project:"))
+async def owner_delete_project(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    request_id = int(callback.data.split(":")[1])
+
+    conn = db()
+    request = conn.execute(
+        "SELECT request_id, business_name, task FROM requests WHERE request_id=?",
+        (request_id,)
+    ).fetchone()
+    conn.close()
+
+    if not request:
+        await callback.answer("Проект уже удалён.", show_alert=True)
+        return
+
+    await callback.message.answer(
+        "<b>Удалить проект?</b>\n\n"
+        f"#{request_id} · {request['business_name']}\n"
+        f"{request['task']}\n\n"
+        "Проект и все связанные отклики будут удалены.",
+        reply_markup=owner_delete_confirm_kb(request_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("owner_delete_confirm:"))
+async def owner_delete_confirm(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    request_id = int(callback.data.split(":")[1])
+
+    conn = db()
+    conn.execute("DELETE FROM responses WHERE request_id=?", (request_id,))
+    conn.execute("DELETE FROM requests WHERE request_id=?", (request_id,))
+    conn.commit()
+    conn.close()
+
+    await callback.message.edit_text(
+        f"🗑 Проект #{request_id} удалён."
+    )
+    await callback.answer("Удалено")
+
+
+@router.callback_query(F.data.startswith("owner_delete_cancel:"))
+async def owner_delete_cancel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text("Удаление отменено.")
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("owner_project_responses:"))
 async def owner_project_responses(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
