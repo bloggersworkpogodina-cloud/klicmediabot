@@ -1738,7 +1738,9 @@ async def owner_mode_blogger(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CreatorForm.name)
     await callback.message.edit_text(
         "<b>Режим блогера</b>\n\n"
-        "Вы проходите обычный сценарий блогера как тестовый пользователь.\n\n"
+        "<b>Перед началом</b>\n\n"
+        "В некоторых вопросах можно выбрать <b>несколько вариантов ответа</b>.\n\n"
+        "Если видите кнопку <b>«Готово»</b> — отметьте все подходящие варианты и нажмите её, чтобы перейти к следующему вопросу.\n\n"
         "1. Как вас зовут?"
     )
     await callback.answer()
@@ -1753,7 +1755,9 @@ async def owner_mode_content(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ContentCreatorForm.name)
     await callback.message.edit_text(
         "<b>Режим контент-креатора</b>\n\n"
-        "Вы проходите обычный сценарий контент-креатора как тестовый пользователь.\n\n"
+        "<b>Перед началом</b>\n\n"
+        "В некоторых вопросах можно выбрать <b>несколько вариантов ответа</b>.\n\n"
+        "Если видите кнопку <b>«Готово»</b> — отметьте все подходящие варианты и нажмите её, чтобы перейти к следующему вопросу.\n\n"
         "1. Как вас зовут?"
     )
     await callback.answer()
@@ -1783,6 +1787,9 @@ async def owner_mode_business(callback: CallbackQuery, state: FSMContext):
         await state.set_state(BusinessForm.business_name)
         await callback.message.edit_text(
             "<b>Режим бизнеса</b>\n\n"
+            "<b>Перед началом</b>\n\n"
+            "В некоторых вопросах можно выбрать <b>несколько вариантов ответа</b>.\n\n"
+            "Если видите кнопку <b>«Готово»</b> — отметьте все подходящие варианты и нажмите её, чтобы перейти к следующему вопросу.\n\n"
             "У вас ещё нет профиля бизнеса. Создадим его один раз.\n\n"
             "Введите название бизнеса:"
         )
