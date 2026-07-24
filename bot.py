@@ -116,7 +116,9 @@ def init_db() -> None:
                 portfolio_link TEXT,
                 delivery_available TEXT,
                 contact TEXT,
-                status TEXT DEFAULT 'active',
+                status TEXT DEFAULT 'pending',
+                moderated_at TEXT,
+                moderated_by BIGINT,
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             )
             """
@@ -208,6 +210,11 @@ def init_db() -> None:
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS response_deadline TEXT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS delivery_deadline TEXT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS extra_info TEXT")
+        conn.execute("ALTER TABLE creators ADD COLUMN IF NOT EXISTS moderated_at TEXT")
+        conn.execute("ALTER TABLE creators ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
+        conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'")
+        conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS moderated_at TEXT")
+        conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_at TEXT")
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT")
@@ -337,6 +344,16 @@ def init_db() -> None:
         ]:
             if column not in request_columns:
                 conn.execute(f"ALTER TABLE requests ADD COLUMN {column} TEXT")
+
+        creator_columns2 = {r[1] for r in conn.execute("PRAGMA table_info(creators)").fetchall()}
+        for column in ["moderated_at", "moderated_by"]:
+            if column not in creator_columns2:
+                conn.execute(f"ALTER TABLE creators ADD COLUMN {column} TEXT")
+
+        business_columns2 = {r[1] for r in conn.execute("PRAGMA table_info(business_profiles)").fetchall()}
+        for column in ["status", "moderated_at", "moderated_by"]:
+            if column not in business_columns2:
+                conn.execute(f"ALTER TABLE business_profiles ADD COLUMN {column} TEXT")
 
         user_columns = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "referred_by" not in user_columns:
@@ -604,6 +621,24 @@ def owner_user_mode_kb():
     kb.button(text="Я бизнес", callback_data="owner_mode_business")
     kb.button(text="Вернуться в панель владельца", callback_data="owner_return")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+
+def profile_moderation_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏢 Заявки бизнесов", callback_data="profile_mod:business")
+    kb.button(text="👤 Заявки блогеров", callback_data="profile_mod:blogger")
+    kb.button(text="🎬 Заявки контент-креаторов", callback_data="profile_mod:content")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def profile_mod_decision_kb(kind: str, user_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Принять", callback_data=f"profile_accept:{kind}:{user_id}")
+    kb.button(text="❌ Отклонить", callback_data=f"profile_reject:{kind}:{user_id}")
+    kb.adjust(2)
     return kb.as_markup()
 
 
@@ -1028,7 +1063,7 @@ async def business_contact(message: Message, state: FSMContext):
     conn.close()
     await state.clear()
     await message.answer(
-        "<b>Готово. Ваш профиль создан.</b>\n\n"
+        "<b>Готово. Анкета бизнеса отправлена на модерацию.</b>\n\n"
         "Теперь можно разместить первую заявку и начать получать отклики креаторов.",
         reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id))
     )
@@ -1349,7 +1384,7 @@ async def cc_contact(message: Message, state: FSMContext):
             on_camera, creator_skills, portfolio_link, delivery_available,
             cooperation_formats, price, excluded_topics, contact, status
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'Контент-креатор', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, ?, 'Контент-креатор', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         ON CONFLICT (user_id) DO UPDATE SET
             name=excluded.name,
             photo_file_id=excluded.photo_file_id,
@@ -1369,7 +1404,7 @@ async def cc_contact(message: Message, state: FSMContext):
             price=excluded.price,
             excluded_topics=excluded.excluded_topics,
             contact=excluded.contact,
-            status='active'
+            status='pending'
         """,
         (
             message.from_user.id,
@@ -1396,8 +1431,8 @@ async def cc_contact(message: Message, state: FSMContext):
     conn.close()
     await state.clear()
     await message.answer(
-        "<b>Готово. Профиль контент-креатора создан.</b>\n\n"
-        "Теперь можно смотреть актуальные проекты и откликаться на подходящие предложения.",
+        "<b>Готово. Анкета контент-креатора отправлена на модерацию.</b>\n\n"
+        "После одобрения профиля вам откроются проекты и отклики.",
         reply_markup=creator_menu_kb()
     )
 
@@ -1743,7 +1778,7 @@ async def creator_contact(message: Message, state: FSMContext):
         (user_id, name, photo_file_id, country, region, city, creator_type, niche, work_format, travel_scope,
          social_link, followers, reach, blog2_platform, blog2_link, blog2_followers, blog2_reach,
          ad_formats, cooperation_formats, price, excluded_topics, brief_ready, contact, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         ON CONFLICT (user_id) DO UPDATE SET
             name=excluded.name, photo_file_id=excluded.photo_file_id, country=excluded.country, region=excluded.region, city=excluded.city,
             creator_type=excluded.creator_type, niche=excluded.niche, work_format=excluded.work_format,
@@ -1753,7 +1788,7 @@ async def creator_contact(message: Message, state: FSMContext):
             blog2_followers=excluded.blog2_followers, blog2_reach=excluded.blog2_reach,
             ad_formats=excluded.ad_formats, cooperation_formats=excluded.cooperation_formats,
             price=excluded.price, excluded_topics=excluded.excluded_topics,
-            brief_ready=excluded.brief_ready, contact=excluded.contact, status='active'
+            brief_ready=excluded.brief_ready, contact=excluded.contact, status='pending'
         """,
         (
             message.from_user.id, data["name"], data.get("photo_file_id"), data.get("country"), data.get("region"), data.get("city"),
@@ -1768,8 +1803,8 @@ async def creator_contact(message: Message, state: FSMContext):
     conn.close()
     await state.clear()
     await message.answer(
-        "<b>Готово. Профиль блогера создан.</b>\n\n"
-        "Теперь можно смотреть актуальные проекты и откликаться на подходящие предложения.",
+        "<b>Готово. Анкета блогера отправлена на модерацию.</b>\n\n"
+        "После одобрения профиля вам откроются проекты и отклики.",
         reply_markup=creator_menu_kb()
     )
 
@@ -1857,6 +1892,225 @@ async def owner_return(callback: CallbackQuery, state: FSMContext):
         reply_markup=owner_reply_kb()
     )
     await callback.answer()
+
+
+
+# ---------- Profile moderation ----------
+
+@router.message(F.text == "🛡 Модерация")
+async def profile_moderation_menu(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    conn = db()
+    businesses = conn.execute(
+        "SELECT COUNT(*) AS c FROM business_profiles WHERE COALESCE(status, 'pending')='pending'"
+    ).fetchone()["c"]
+    bloggers = conn.execute(
+        "SELECT COUNT(*) AS c FROM creators WHERE creator_type='Блогер' AND COALESCE(status, 'pending')='pending'"
+    ).fetchone()["c"]
+    content = conn.execute(
+        "SELECT COUNT(*) AS c FROM creators WHERE creator_type='Контент-креатор' AND COALESCE(status, 'pending')='pending'"
+    ).fetchone()["c"]
+    conn.close()
+
+    total = businesses + bloggers + content
+    await message.answer(
+        "<b>Модерация регистраций</b>\n\n"
+        f"Осталось: <b>{total}</b>\n\n"
+        f"Бизнесы — {businesses}\n"
+        f"Блогеры — {bloggers}\n"
+        f"Контент-креаторы — {content}",
+        reply_markup=profile_moderation_kb()
+    )
+
+
+async def show_next_profile_for_moderation(message: Message, kind: str):
+    conn = db()
+
+    if kind == "business":
+        row = conn.execute(
+            """
+            SELECT * FROM business_profiles
+            WHERE COALESCE(status, 'pending')='pending'
+            ORDER BY user_id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS c FROM business_profiles WHERE COALESCE(status, 'pending')='pending'"
+        ).fetchone()["c"]
+    elif kind == "blogger":
+        row = conn.execute(
+            """
+            SELECT * FROM creators
+            WHERE creator_type='Блогер'
+              AND COALESCE(status, 'pending')='pending'
+            ORDER BY user_id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        remaining = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM creators
+            WHERE creator_type='Блогер'
+              AND COALESCE(status, 'pending')='pending'
+            """
+        ).fetchone()["c"]
+    else:
+        row = conn.execute(
+            """
+            SELECT * FROM creators
+            WHERE creator_type='Контент-креатор'
+              AND COALESCE(status, 'pending')='pending'
+            ORDER BY user_id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        remaining = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM creators
+            WHERE creator_type='Контент-креатор'
+              AND COALESCE(status, 'pending')='pending'
+            """
+        ).fetchone()["c"]
+
+    conn.close()
+
+    if not row:
+        await message.answer(
+            "В этой очереди больше нет заявок ✅",
+            reply_markup=profile_moderation_kb()
+        )
+        return
+
+    if kind == "business":
+        text = (
+            "<b>Заявка бизнеса</b>\n\n"
+            f"Название: {row['business_name'] or '—'}\n"
+            f"Город: {row['city'] or '—'}\n"
+            f"Ниша: {row['niche'] or '—'}\n"
+            f"Соцсети: {row['social_link'] or '—'}\n"
+            f"Контакт: {row['contact'] or '—'}\n\n"
+            f"<b>Осталось: {remaining}</b>"
+        )
+        await message.answer(
+            text,
+            reply_markup=profile_mod_decision_kb("business", row["user_id"])
+        )
+    else:
+        prefix = "Заявка блогера" if kind == "blogger" else "Заявка контент-креатора"
+        text_prefix = f"<b>{prefix}</b>\n\n<b>Осталось: {remaining}</b>"
+        if row["photo_file_id"]:
+            await message.answer_photo(
+                row["photo_file_id"],
+                caption=text_prefix + "\n\n" + creator_card(row),
+                reply_markup=profile_mod_decision_kb(kind, row["user_id"])
+            )
+        else:
+            await message.answer(
+                text_prefix + "\n\n" + creator_card(row),
+                reply_markup=profile_mod_decision_kb(kind, row["user_id"])
+            )
+
+
+@router.callback_query(F.data.startswith("profile_mod:"))
+async def profile_moderation_queue(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    kind = callback.data.split(":", 1)[1]
+    await callback.answer()
+    await show_next_profile_for_moderation(callback.message, kind)
+
+
+@router.callback_query(F.data.startswith("profile_accept:"))
+async def profile_accept(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    _, kind, user_id_raw = callback.data.split(":")
+    user_id = int(user_id_raw)
+    conn = db()
+
+    if kind == "business":
+        conn.execute(
+            """
+            UPDATE business_profiles
+            SET status='active', moderated_at=?, moderated_by=?
+            WHERE user_id=?
+            """,
+            (datetime.now().isoformat(), callback.from_user.id, user_id)
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE creators
+            SET status='active', moderated_at=?, moderated_by=?
+            WHERE user_id=?
+            """,
+            (datetime.now().isoformat(), callback.from_user.id, user_id)
+        )
+
+    conn.commit()
+    conn.close()
+
+    try:
+        await bot.send_message(
+            user_id,
+            "<b>Ваша регистрация в КЛИК одобрена ✅</b>\n\n"
+            "Теперь вам доступны все возможности платформы."
+        )
+    except Exception:
+        pass
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Принято")
+    await show_next_profile_for_moderation(callback.message, kind)
+
+
+@router.callback_query(F.data.startswith("profile_reject:"))
+async def profile_reject(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    _, kind, user_id_raw = callback.data.split(":")
+    user_id = int(user_id_raw)
+    conn = db()
+
+    if kind == "business":
+        conn.execute(
+            """
+            UPDATE business_profiles
+            SET status='rejected', moderated_at=?, moderated_by=?
+            WHERE user_id=?
+            """,
+            (datetime.now().isoformat(), callback.from_user.id, user_id)
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE creators
+            SET status='rejected', moderated_at=?, moderated_by=?
+            WHERE user_id=?
+            """,
+            (datetime.now().isoformat(), callback.from_user.id, user_id)
+        )
+
+    conn.commit()
+    conn.close()
+
+    try:
+        await bot.send_message(
+            user_id,
+            "<b>Регистрация пока не одобрена.</b>\n\n"
+            "Вы можете обновить профиль и отправить данные на повторную проверку."
+        )
+    except Exception:
+        pass
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Отклонено")
+    await show_next_profile_for_moderation(callback.message, kind)
 
 
 # ---------- Owner businesses ----------
@@ -2104,7 +2358,7 @@ async def admin_request_budget(message: Message, state: FSMContext):
         (business_user_id, business_name, city, niche, task, creator_needed,
          cooperation_format, budget, social_link, contact, status, created_at,
          moderated_at, moderated_by)
-        VALUES (?, ?, ?, ?, ?, 'Блогер', ?, ?, ?, ?, 'active', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 'Блогер', ?, ?, ?, ?, 'pending', ?, ?, ?)
         RETURNING request_id
         """,
         (
@@ -2141,9 +2395,16 @@ async def admin_request_budget(message: Message, state: FSMContext):
 async def creator_edit_profile(callback: CallbackQuery, state: FSMContext):
     conn = db()
     creator = conn.execute(
-        "SELECT creator_type FROM creators WHERE user_id=?",
+        "SELECT creator_type, status FROM creators WHERE user_id=?",
         (callback.from_user.id,)
     ).fetchone()
+    if creator and creator["status"] != "active":
+        conn.close()
+        await callback.message.answer(
+            "Ваш профиль ещё проходит модерацию. После одобрения здесь появятся проекты."
+        )
+        await callback.answer()
+        return
     conn.close()
 
     await state.clear()
@@ -2848,7 +3109,7 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
 @router.callback_query(F.data == "creator_view_requests")
 async def creator_view_requests(callback: CallbackQuery):
     conn = db()
-    requests = conn.execute("SELECT * FROM requests WHERE status='active' ORDER BY request_id DESC LIMIT 10").fetchall()
+    requests = conn.execute("SELECT * FROM requests WHERE status='pending' ORDER BY request_id DESC LIMIT 10").fetchall()
     conn.close()
     if not requests:
         await callback.message.edit_text("Сейчас активных заявок нет.", reply_markup=creator_menu_kb())
@@ -2870,7 +3131,7 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
         await callback.answer("Сначала заполните анкету креатора", show_alert=True)
         return
 
-    request = conn.execute("SELECT * FROM requests WHERE request_id=? AND status='active'", (request_id,)).fetchone()
+    request = conn.execute("SELECT * FROM requests WHERE request_id=? AND status='pending'", (request_id,)).fetchone()
     if not request:
         conn.close()
         await callback.answer("Заявка уже не активна", show_alert=True)
@@ -3155,7 +3416,7 @@ async def broadcast_approved_request(bot: Bot, request_id: int):
     conn = db()
     request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
     creators = conn.execute(
-        "SELECT * FROM creators WHERE status='active' AND creator_type=?",
+        "SELECT * FROM creators WHERE status='pending' AND creator_type=?",
         (request["creator_needed"],)
     ).fetchall() if request else []
     conn.close()
@@ -3188,7 +3449,7 @@ async def admin(message: Message):
     await message.answer("<b>Панель владельца КЛИК</b>", reply_markup=owner_reply_kb())
 
 
-@router.message(F.text == "🛡 Модерация")
+@router.message(F.text == "__OLD_MODERATION__")
 async def owner_moderation_message(message: Message):
     if not is_admin(message.from_user.id):
         return
@@ -3217,7 +3478,7 @@ async def moderate_approve(callback: CallbackQuery, bot: Bot):
         await callback.answer("Заявка уже обработана", show_alert=True)
         return
     conn.execute(
-        "UPDATE requests SET status='active', moderated_at=?, moderated_by=? WHERE request_id=?",
+        "UPDATE requests SET status='pending', moderated_at=?, moderated_by=? WHERE request_id=?",
         (datetime.now().isoformat(), callback.from_user.id, request_id),
     )
     conn.commit()
@@ -3275,7 +3536,7 @@ async def stats_text() -> str:
     businesses = conn.execute("SELECT COUNT(*) AS c FROM business_profiles").fetchone()["c"]
     requests = conn.execute("SELECT COUNT(*) AS c FROM requests").fetchone()["c"]
     pending = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE status='pending'").fetchone()["c"]
-    active = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE status='active'").fetchone()["c"]
+    active = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE status='pending'").fetchone()["c"]
     responses = conn.execute("SELECT COUNT(*) AS c FROM responses").fetchone()["c"]
     accepted = conn.execute("SELECT COUNT(*) AS c FROM responses WHERE status='accepted'").fetchone()["c"]
     referred = conn.execute("SELECT COUNT(*) AS c FROM users WHERE referred_by IS NOT NULL").fetchone()["c"]
