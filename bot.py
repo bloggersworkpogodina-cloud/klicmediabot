@@ -3653,7 +3653,7 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
             creator_skills, product_provided, response_deadline, delivery_deadline,
             extra_info, status, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         RETURNING request_id
         """,
         (
