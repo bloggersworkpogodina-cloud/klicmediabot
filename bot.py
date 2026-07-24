@@ -672,7 +672,7 @@ def admin_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Заявки на модерацию", callback_data="admin_moderation")
     kb.button(text="Статистика", callback_data="admin_stats")
-    kb.button(text="Все заявки", callback_data="admin_requests")
+    kb.button(text="Проекты", callback_data="admin_requests")
     kb.button(text="Выгрузить Excel", callback_data="admin_export")
     kb.adjust(1)
     return kb.as_markup()
@@ -842,7 +842,7 @@ def owner_reply_kb():
         keyboard=[
             [KeyboardButton(text="🛡 Модерация"), KeyboardButton(text="📊 Статистика")],
             [KeyboardButton(text="👥 Творцы"), KeyboardButton(text="🏢 Бизнесы")],
-            [KeyboardButton(text="📋 Все заявки"), KeyboardButton(text="💬 Все отклики")],
+            [KeyboardButton(text="📁 Проекты"), KeyboardButton(text="💬 Все отклики")],
             [KeyboardButton(text="📥 Выгрузить Excel"), KeyboardButton(text="📣 Рассылка")],
             [KeyboardButton(text="💬 Сообщения"), KeyboardButton(text="🔗 Рефералы")],
             [KeyboardButton(text="👤 Режим пользователя")],
@@ -2707,9 +2707,6 @@ async def profile_moderation_queue(callback: CallbackQuery):
         return
     kind = callback.data.split(":", 1)[1]
     await callback.answer()
-    if kind == "projects":
-        await send_pending_requests(callback.message)
-        return
     await show_next_profile_for_moderation(callback.message, kind)
 
 
@@ -4473,7 +4470,7 @@ async def owner_businesses(message: Message):
         )
 
 
-@router.message(F.text == "📋 Все заявки")
+@router.message(F.text == "📁 Проекты")
 async def owner_requests(message: Message):
     if not is_admin(message.from_user.id):
         return
@@ -4481,11 +4478,25 @@ async def owner_requests(message: Message):
     rows = conn.execute("SELECT * FROM requests ORDER BY request_id DESC LIMIT 30").fetchall()
     conn.close()
     if not rows:
-        await message.answer("Заявок пока нет.", reply_markup=owner_reply_kb())
+        await message.answer("Проектов пока нет.", reply_markup=owner_reply_kb())
         return
-    await message.answer(f"<b>Последние заявки: {len(rows)}</b>", reply_markup=owner_reply_kb())
+
+    status_labels = {
+        "pending": "🟡 На модерации",
+        "active": "🟢 Активный",
+        "completed": "⚪️ Завершён",
+        "rejected": "🔴 Отклонён",
+    }
+
+    await message.answer(
+        f"<b>Проекты КЛИК</b>\nВсего показано: {len(rows)}",
+        reply_markup=owner_reply_kb()
+    )
     for r in rows:
-        await message.answer(request_card(r), reply_markup=moderation_kb(r["request_id"]) if r["status"] == "pending" else None)
+        status = r["status"] or "pending"
+        prefix = f"<b>{status_labels.get(status, status)}</b>"
+        markup = moderation_kb(r["request_id"]) if status == "pending" else None
+        await send_request_card(message, r, reply_markup=markup, prefix=prefix)
 
 
 @router.callback_query(F.data == "admin_requests")
