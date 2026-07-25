@@ -217,6 +217,17 @@ def init_db() -> None:
         conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'")
         conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS moderated_at TEXT")
         conn.execute("ALTER TABLE business_profiles ADD COLUMN IF NOT EXISTS moderated_by BIGINT")
+        conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS daily_distribution INTEGER DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_delivery_log (
+                request_id BIGINT NOT NULL,
+                creator_user_id BIGINT NOT NULL,
+                sent_at TEXT,
+                PRIMARY KEY (request_id, creator_user_id)
+            )
+            """
+        )
         conn.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS completed_at TEXT")
         conn.execute(
             """
@@ -368,6 +379,19 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE business_profiles ADD COLUMN {column} TEXT")
 
         request_columns_v20 = {r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()}
+        if "daily_distribution" not in request_columns_v20:
+            conn.execute("ALTER TABLE requests ADD COLUMN daily_distribution INTEGER DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_delivery_log (
+                request_id INTEGER NOT NULL,
+                creator_user_id INTEGER NOT NULL,
+                sent_at TEXT,
+                PRIMARY KEY (request_id, creator_user_id)
+            )
+            """
+        )
+
         if "completed_at" not in request_columns_v20:
             conn.execute("ALTER TABLE requests ADD COLUMN completed_at TEXT")
 
@@ -1072,7 +1096,75 @@ def creator_matches_request_geo(creator, request) -> bool:
     return False
 
 
-def matching_creators_for_request(request):
+RU_MONTHS = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
+    "мая": 5, "июня": 6, "июля": 7, "августа": 8,
+    "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+
+
+def parse_project_deadline(value: str):
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+
+    # DD.MM.YYYY / DD.MM / YYYY-MM-DD
+    for fmt in ("%d.%m.%Y", "%d.%m", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if fmt == "%d.%m":
+                dt = dt.replace(year=datetime.now(MSK_TZ).year)
+            return dt.date()
+        except ValueError:
+            pass
+
+    # "30 июля" / "30 июля 2026"
+    parts = text.replace(",", " ").split()
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1] in RU_MONTHS:
+        year = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else datetime.now(MSK_TZ).year
+        try:
+            return datetime(year, RU_MONTHS[parts[1]], int(parts[0])).date()
+        except ValueError:
+            return None
+    return None
+
+
+def project_distribution_open(request) -> bool:
+    if (request["status"] or "") != "active":
+        return False
+    deadline = parse_project_deadline(request["response_deadline"])
+    if deadline and datetime.now(MSK_TZ).date() > deadline:
+        return False
+    return True
+
+
+def creator_already_received(request_id: int, creator_user_id: int) -> bool:
+    conn = db()
+    row = conn.execute(
+        "SELECT 1 FROM project_delivery_log WHERE request_id=? AND creator_user_id=?",
+        (request_id, creator_user_id)
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def mark_project_delivered(request_id: int, creator_user_id: int):
+    conn = db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO project_delivery_log (request_id, creator_user_id, sent_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT (request_id, creator_user_id) DO NOTHING
+            """,
+            (request_id, creator_user_id, datetime.now(MSK_TZ).isoformat())
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def matching_creators_for_request(request, only_unsent: bool = True):
     conn = db()
     rows = conn.execute(
         """
@@ -1083,12 +1175,22 @@ def matching_creators_for_request(request):
         (request["creator_needed"],)
     ).fetchall()
     conn.close()
-    return [creator for creator in rows if creator_matches_request_geo(creator, request)]
+
+    matched = [creator for creator in rows if creator_matches_request_geo(creator, request)]
+    if only_unsent:
+        matched = [
+            creator for creator in matched
+            if not creator_already_received(request["request_id"], creator["user_id"])
+        ]
+    return matched
 
 
 async def notify_matching_creators(request):
+    if not project_distribution_open(request):
+        return 0
+
     creator_type = request["creator_needed"]
-    rows = matching_creators_for_request(request)
+    rows = matching_creators_for_request(request, only_unsent=True)
 
     sent = 0
     for creator in rows:
@@ -1115,6 +1217,7 @@ async def notify_matching_creators(request):
                 f"Отклики до: {request['response_deadline'] or '—'}",
                 reply_markup=kb.as_markup()
             )
+            mark_project_delivered(request["request_id"], creator["user_id"])
             sent += 1
         except Exception:
             pass
@@ -4573,7 +4676,9 @@ async def owner_requests(message: Message):
     )
     for r in rows:
         status = r["status"] or "pending"
-        prefix = f"<b>{status_labels.get(status, status)}</b>"
+        daily_on = bool(r["daily_distribution"]) if "daily_distribution" in r.keys() else False
+        distribution_line = "\n📣 Ежедневная рассылка: включена" if status == "active" and daily_on else ""
+        prefix = f"<b>{status_labels.get(status, status)}</b>{distribution_line}"
         markup = owner_project_kb(r["request_id"], status)
         await send_request_card(message, r, reply_markup=markup, prefix=prefix)
 
@@ -4667,8 +4772,8 @@ async def owner_filter_send(callback: CallbackQuery):
 
     matched = matching_creators_for_request(request)
     await callback.message.answer(
-        f"<b>Рассылка проекта #{request_id}</b>\\n\\n"
-        f"По фильтру найдено творцов: <b>{len(matched)}</b>.\\n"
+        f"<b>Рассылка проекта #{request_id}</b>\n\n"
+        f"Новых творцов, которые ещё не получали проект: <b>{len(matched)}</b>.\n"
         "Отправить им проект?",
         reply_markup=owner_filter_send_confirm_kb(request_id)
     )
@@ -4693,9 +4798,17 @@ async def owner_filter_send_confirm(callback: CallbackQuery):
         await callback.answer("Проект не найден или уже не активен.", show_alert=True)
         return
 
+    conn = db()
+    conn.execute(
+        "UPDATE requests SET daily_distribution=1 WHERE request_id=?",
+        (request_id,)
+    )
+    conn.commit()
+    conn.close()
+
     sent = await notify_matching_creators(request)
     await callback.message.edit_text(
-        f"📣 Проект #{request_id} отправлен.\\nПолучили уведомление: <b>{sent}</b> творцов."
+        f"📣 Проект #{request_id} отправлен.\nНовых получателей: <b>{sent}</b>.\nЕжедневная рассылка включена до дедлайна."
     )
     await callback.answer("Рассылка отправлена")
 
@@ -5113,6 +5226,46 @@ async def send_business_daily_digests(bot: Bot):
 
 
 
+
+async def send_daily_project_distributions():
+    """Daily: send active projects only to newly matched creators who never received them before."""
+    while True:
+        now = datetime.now(MSK_TZ)
+
+        if now.hour == 11:
+            conn = db()
+            projects = conn.execute(
+                """
+                SELECT * FROM requests
+                WHERE status='active'
+                  AND COALESCE(daily_distribution, 0)=1
+                ORDER BY request_id
+                """
+            ).fetchall()
+            conn.close()
+
+            for request in projects:
+                if not project_distribution_open(request):
+                    # Deadline passed: stop future automatic sends.
+                    deadline = parse_project_deadline(request["response_deadline"])
+                    if deadline and now.date() > deadline:
+                        conn = db()
+                        conn.execute(
+                            "UPDATE requests SET daily_distribution=0 WHERE request_id=?",
+                            (request["request_id"],)
+                        )
+                        conn.commit()
+                        conn.close()
+                    continue
+
+                await notify_matching_creators(request)
+
+            await asyncio.sleep(3700)
+        else:
+            await asyncio.sleep(60)
+
+
+
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing. Add it to Railway Variables")
@@ -5125,10 +5278,12 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     digest_task = asyncio.create_task(send_business_daily_digests(bot))
+    project_distribution_task = asyncio.create_task(send_daily_project_distributions())
     try:
         await dp.start_polling(bot)
     finally:
         digest_task.cancel()
+        project_distribution_task.cancel()
 
 
 if __name__ == "__main__":
