@@ -11,7 +11,15 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 import psycopg
@@ -3388,7 +3396,9 @@ async def create_request_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    if (profile["status"] or "pending") != "active":
+    # The owner uses the same business cabinet to test and create requests.
+    # Regular businesses still must pass moderation before this action opens.
+    if not is_admin(callback.from_user.id) and (profile["status"] or "pending") != "active":
         await callback.message.answer(
             "Профиль бизнеса ещё проходит модерацию. Создание проектов откроется после одобрения."
         )
@@ -4021,7 +4031,7 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
     await send_request_card(
         message,
         request,
-        reply_markup=business_menu_kb(),
+        reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id)),
         prefix="<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у контент-креаторов."
     )
 
@@ -5088,7 +5098,7 @@ async def owner_user_mode(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "<b>Режим пользователя</b>\n\nВыберите роль, от имени которой хотите посмотреть бот:",
-        reply_markup=main_menu_kb(),
+        reply_markup=owner_user_mode_kb(),
     )
 
 
