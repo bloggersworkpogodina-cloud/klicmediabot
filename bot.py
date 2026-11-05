@@ -1,6 +1,9 @@
 import asyncio
 import os
 import sqlite3
+import logging
+from html import escape
+from form_navigation import FormNavigation, CaptureFormPrompt
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -42,7 +45,11 @@ USE_POSTGRES = bool(DATABASE_URL)
 BUSINESS_DIGEST_HOUR = int(os.getenv("BUSINESS_DIGEST_HOUR", "20"))
 MSK_TZ = timezone(timedelta(hours=3))
 
+logger = logging.getLogger(__name__)
 router = Router()
+router.message.outer_middleware(FormNavigation())
+router.callback_query.outer_middleware(FormNavigation())
+distribution_lock = asyncio.Lock()
 
 
 # =========================
@@ -531,6 +538,7 @@ def admin_businesses_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Добавить бизнес", callback_data="admin_business_add")
     kb.button(text="📋 Все бизнесы", callback_data="admin_business_list")
+    kb.button(text="🏢 Зарегистрированные бизнесы", callback_data="registered_businesses")
     kb.button(text="➕ Создать заявку", callback_data="admin_request_choose_business")
     kb.adjust(1)
     return kb.as_markup()
@@ -1085,13 +1093,12 @@ def creator_matches_request_geo(creator, request) -> bool:
 
     creator_city = _norm_geo(creator["city"] if "city" in creator.keys() else "")
     creator_region = _norm_geo(creator["region"] if "region" in creator.keys() else "")
-    creator_country = _norm_geo(creator["country"] if "country" in creator.keys() else "")
-    travel = _norm_geo(creator["travel_ready"] if "travel_ready" in creator.keys() else "")
+    travel = _norm_geo(creator["travel_scope"] if "travel_scope" in creator.keys() else "")
 
     # Same city / region.
     if creator_city and (creator_city in req_geo or req_geo in creator_city):
         return True
-    if creator_region and (creator_region in req_geo or req_geo in creator_region):
+    if travel == "по региону" and creator_region and (creator_region in req_geo or req_geo in creator_region):
         return True
 
     # Creators who explicitly indicated readiness to travel.
@@ -1193,8 +1200,16 @@ def matching_creators_for_request(request, only_unsent: bool = True):
     return matched
 
 
-async def notify_matching_creators(request):
-    if not project_distribution_open(request):
+async def notify_matching_creators(request, bot: Bot):
+    async with distribution_lock:
+        return await _notify_matching_creators(request, bot)
+
+
+async def _notify_matching_creators(request, bot: Bot):
+    conn = db()
+    request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request["request_id"],)).fetchone()
+    conn.close()
+    if not request or not project_distribution_open(request):
         return 0
 
     creator_type = request["creator_needed"]
@@ -1211,24 +1226,24 @@ async def notify_matching_creators(request):
         kb = InlineKeyboardBuilder()
         kb.button(
             text="Посмотреть проект",
-            callback_data=f"project_open:{request['request_id']}"
+            callback_data=f"project_open:{escape(str(request['request_id']))}"
         )
 
         try:
             await bot.send_message(
                 creator["user_id"],
                 f"<b>{title}</b>\n\n"
-                f"<b>{request['business_name']}</b>\n"
-                f"📍 {request['city'] or 'Онлайн'}\n"
-                f"Условия: {request['cooperation_format'] or '—'}\n"
-                f"Бюджет: {request['budget'] or 'Обсуждается'}\n"
-                f"Отклики до: {request['response_deadline'] or '—'}",
+                f"<b>{escape(str(request['business_name']))}</b>\n"
+                f"📍 {escape(str(request['city'] or 'Онлайн'))}\n"
+                f"Условия: {escape(str(request['cooperation_format'] or '—'))}\n"
+                f"Бюджет: {escape(str(request['budget'] or 'Обсуждается'))}\n"
+                f"Отклики до: {escape(str(request['response_deadline'] or '—'))}",
                 reply_markup=kb.as_markup()
             )
             mark_project_delivered(request["request_id"], creator["user_id"])
             sent += 1
         except Exception:
-            pass
+            logger.exception("Project delivery failed: project=%s creator=%s", request["request_id"], creator["user_id"])
 
     return sent
 
@@ -1288,20 +1303,45 @@ def project_summary_card(request, summary) -> str:
     chosen = ", ".join(summary["accepted_names"]) if summary["accepted_names"] else "—"
     return (
         "<b>Итоги проекта</b>\n\n"
-        f"<b>{request['business_name']}</b>\n"
-        f"{request['task']}\n\n"
-        f"Всего откликов: <b>{summary['total']}</b>\n"
-        f"Принято: <b>{summary['accepted']}</b>\n"
-        f"Отклонено: {summary['declined']}\n"
-        f"Без решения: {summary['undecided']}\n\n"
+        f"<b>{escape(str(request['business_name']))}</b>\n"
+        f"{escape(str(request['task']))}\n\n"
+        f"Всего откликов: <b>{escape(str(summary['total']))}</b>\n"
+        f"Принято: <b>{escape(str(summary['accepted']))}</b>\n"
+        f"Отклонено: {escape(str(summary['declined']))}\n"
+        f"Без решения: {escape(str(summary['undecided']))}\n\n"
         f"<b>Выбранные творцы:</b> {chosen}"
     )
+
+
+def distribution_summary(request):
+    conn = db()
+    delivered = conn.execute("SELECT COUNT(*) AS n FROM project_delivery_log WHERE request_id=?",
+                             (request["request_id"],)).fetchone()["n"]
+    conn.close()
+    active = project_distribution_open(request)
+    enabled = active and bool(request["daily_distribution"])
+    new_count = len(matching_creators_for_request(request)) if active else 0
+    lines = [f"Уже получили: {delivered}", f"Новых подходящих: {new_count}"]
+    if enabled:
+        now = datetime.now(MSK_TZ)
+        next_run = now.replace(hour=11, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        deadline = parse_project_deadline(request["response_deadline"])
+        lines.append("Авторассылка: ежедневно в 11:00 МСК")
+        if not deadline or next_run.date() <= deadline:
+            lines.append(f"Следующая проверка: {next_run:%d.%m.%Y %H:%M} МСК")
+        else:
+            lines.append("Следующей рассылки нет: истекает дедлайн")
+    else:
+        lines.append("Авторассылка: выключена")
+    return "\n".join(lines)
 
 
 def request_card(r) -> str:
     def val(key, fallback="—"):
         try:
-            return r[key] or fallback
+            return escape(str(r[key] or fallback))
         except Exception:
             return fallback
 
@@ -1349,13 +1389,17 @@ async def send_request_card(message: Message, request, reply_markup=None, prefix
         photo = request["photo_file_id"]
     except Exception:
         photo = None
-    if photo:
+    if photo and len(text) <= 1024:
         await message.answer_photo(photo, caption=text, reply_markup=reply_markup)
+    elif photo:
+        await message.answer_photo(photo)
+        await message.answer(text, reply_markup=reply_markup)
     else:
         await message.answer(text, reply_markup=reply_markup)
 
 
 def creator_card(c) -> str:
+    c = {key: escape(value) if isinstance(value, str) else value for key, value in dict(c).items()}
     if (c["creator_type"] or "") == "Контент-креатор":
         return (
             f"<b>Контент-креатор</b>\n\n"
@@ -1400,8 +1444,11 @@ async def send_creator_card(message: Message, creator, reply_markup=None, includ
     text = creator_card(creator)
     if include_contact:
         text += "\n\n" + contact_line(creator["user_id"], creator["contact"])
-    if creator["photo_file_id"]:
+    if creator["photo_file_id"] and len(text) <= 1024:
         await message.answer_photo(creator["photo_file_id"], caption=text, reply_markup=reply_markup)
+    elif creator["photo_file_id"]:
+        await message.answer_photo(creator["photo_file_id"])
+        await message.answer(text, reply_markup=reply_markup)
     else:
         await message.answer(text, reply_markup=reply_markup)
 
@@ -1411,7 +1458,7 @@ def contact_line(user_id: int, contact: str) -> str:
     u = conn.execute("SELECT username FROM users WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     tg = f"@{u['username']}" if u and u['username'] else "username не указан"
-    return f"Telegram: {tg}\nКонтакт: {contact}"
+    return f"Telegram: {escape(tg)}\nКонтакт: {escape(contact or '—')}"
 
 
 # =========================
@@ -1610,14 +1657,14 @@ async def business_contact(message: Message, state: FSMContext):
     conn.execute(
         """
         INSERT INTO business_profiles
-        (user_id, business_name, city, niche, social_link, contact)
-        VALUES (?, ?, ?, ?, ?, ?)
+        (user_id, business_name, city, niche, social_link, contact, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending')
         ON CONFLICT (user_id) DO UPDATE SET
             business_name=excluded.business_name,
             city=excluded.city,
             niche=excluded.niche,
             social_link=excluded.social_link,
-            contact=excluded.contact
+            contact=excluded.contact, status='pending', moderated_at=NULL, moderated_by=NULL
         """,
         (message.from_user.id, data["business_name"], data["city"], data["niche"], data["social_link"], message.text)
     )
@@ -2474,7 +2521,12 @@ async def project_open_from_notification(callback: CallbackQuery):
         "SELECT * FROM requests WHERE request_id=? AND status='active'",
         (request_id,)
     ).fetchone()
+    creator = conn.execute("SELECT * FROM creators WHERE user_id=?", (callback.from_user.id,)).fetchone()
     conn.close()
+
+    if not creator or creator["status"] != "active" or (request and creator["creator_type"] != request["creator_needed"]):
+        await callback.answer("Проект недоступен для вашей анкеты.", show_alert=True)
+        return
 
     if not request:
         await callback.answer("Эта заявка уже недоступна.", show_alert=True)
@@ -2483,7 +2535,7 @@ async def project_open_from_notification(callback: CallbackQuery):
     await send_request_card(
         callback.message,
         request,
-        reply_markup=response_kb(request_id)
+        reply_markup=request_kb(request_id)
     )
     await callback.answer()
 
@@ -2502,7 +2554,7 @@ async def support_start(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(SupportForm.question)
-async def support_question(message: Message, state: FSMContext):
+async def support_question(message: Message, state: FSMContext, bot: Bot):
     text = (message.text or "").strip()
     if not text:
         await message.answer("Напишите вопрос текстом одним сообщением.")
@@ -2546,10 +2598,10 @@ async def support_question(message: Message, state: FSMContext):
             await bot.send_message(
                 admin_id,
                 "<b>Новое сообщение</b>\n\n"
-                f"От: {message.from_user.full_name}\n"
+                f"От: {escape(message.from_user.full_name)}\n"
                 f"Роль: {role}\n"
                 f"{username}\n\n"
-                f"{text}",
+                f"{escape(text)}",
                 reply_markup=support_ticket_kb(ticket_id)
             )
         except Exception:
@@ -2616,9 +2668,9 @@ async def support_list(callback: CallbackQuery):
 
     for row in rows:
         await callback.message.answer(
-            f"<b>Обращение #{row['ticket_id']}</b>\n"
-            f"Роль: {row['role'] or '—'}\n\n"
-            f"{row['message_text']}",
+            f"<b>Обращение #{escape(str(row['ticket_id']))}</b>\n"
+            f"Роль: {escape(str(row['role'] or '—'))}\n\n"
+            f"{escape(row['message_text'])}",
             reply_markup=support_ticket_kb(row["ticket_id"]) if status == "new" else None
         )
 
@@ -2653,7 +2705,7 @@ async def support_reply_start(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(SupportReplyForm.reply)
-async def support_reply_send(message: Message, state: FSMContext):
+async def support_reply_send(message: Message, state: FSMContext, bot: Bot):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
@@ -2699,7 +2751,7 @@ async def support_reply_send(message: Message, state: FSMContext):
     try:
         await bot.send_message(
             ticket["user_id"],
-            "<b>Ответ команды КЛИК</b>\n\n" + text
+            "<b>Ответ команды КЛИК</b>\n\n" + escape(text)
         )
         await message.answer("Ответ отправлен ✅")
     except Exception:
@@ -2820,11 +2872,11 @@ async def show_next_profile_for_moderation(message: Message, kind: str):
     if kind == "business":
         text = (
             "<b>Заявка бизнеса</b>\n\n"
-            f"Название: {row['business_name'] or '—'}\n"
-            f"Город: {row['city'] or '—'}\n"
-            f"Ниша: {row['niche'] or '—'}\n"
-            f"Соцсети: {row['social_link'] or '—'}\n"
-            f"Контакт: {row['contact'] or '—'}\n\n"
+            f"Название: {escape(str(row['business_name'] or '—'))}\n"
+            f"Город: {escape(str(row['city'] or '—'))}\n"
+            f"Ниша: {escape(str(row['niche'] or '—'))}\n"
+            f"Соцсети: {escape(str(row['social_link'] or '—'))}\n"
+            f"Контакт: {escape(str(row['contact'] or '—'))}\n\n"
             f"<b>Осталось: {remaining}</b>"
         )
         await message.answer(
@@ -2888,13 +2940,25 @@ async def profile_moderation_queue(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("profile_accept:"))
-async def profile_accept(callback: CallbackQuery):
+async def profile_accept(callback: CallbackQuery, bot: Bot):
     if not is_admin(callback.from_user.id):
         return
 
     _, kind, user_id_raw = callback.data.split(":")
     user_id = int(user_id_raw)
     conn = db()
+
+    if kind not in {"business", "blogger", "content"}:
+        conn.close()
+        await callback.answer("Неизвестная очередь", show_alert=True)
+        return
+    table = "business_profiles" if kind == "business" else "creators"
+    profile = conn.execute(f"SELECT * FROM {table} WHERE user_id=?", (user_id,)).fetchone()
+    expected_type = "Блогер" if kind == "blogger" else "Контент-креатор"
+    if not profile or (profile["status"] or "pending") != "pending" or (kind != "business" and profile["creator_type"] != expected_type):
+        conn.close()
+        await callback.answer("Анкета уже обработана или не найдена", show_alert=True)
+        return
 
     if kind == "business":
         conn.execute(
@@ -2933,13 +2997,25 @@ async def profile_accept(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("profile_reject:"))
-async def profile_reject(callback: CallbackQuery):
+async def profile_reject(callback: CallbackQuery, bot: Bot):
     if not is_admin(callback.from_user.id):
         return
 
     _, kind, user_id_raw = callback.data.split(":")
     user_id = int(user_id_raw)
     conn = db()
+
+    if kind not in {"business", "blogger", "content"}:
+        conn.close()
+        await callback.answer("Неизвестная очередь", show_alert=True)
+        return
+    table = "business_profiles" if kind == "business" else "creators"
+    profile = conn.execute(f"SELECT * FROM {table} WHERE user_id=?", (user_id,)).fetchone()
+    expected_type = "Блогер" if kind == "blogger" else "Контент-креатор"
+    if not profile or (profile["status"] or "pending") != "pending" or (kind != "business" and profile["creator_type"] != expected_type):
+        conn.close()
+        await callback.answer("Анкета уже обработана или не найдена", show_alert=True)
+        return
 
     if kind == "business":
         conn.execute(
@@ -2980,7 +3056,7 @@ async def profile_reject(callback: CallbackQuery):
 # ---------- Owner businesses ----------
 
 @router.message(F.text == "🏢 Бизнесы")
-async def owner_businesses(message: Message):
+async def owner_business_tools(message: Message):
     if not is_admin(message.from_user.id):
         return
     await message.answer(
@@ -3163,7 +3239,7 @@ async def admin_request_for_business(callback: CallbackQuery, state: FSMContext)
     await state.update_data(admin_business_id=business_id)
     await state.set_state(AdminRequestForm.title)
     await callback.message.answer(
-        f"<b>Новая заявка от {business['business_name']}</b>\n\n"
+        f"<b>Новая заявка от {escape(str(business['business_name']))}</b>\n\n"
         "Короткий заголовок заявки:"
     )
     await callback.answer()
@@ -3247,85 +3323,25 @@ async def admin_request_budget(message: Message, state: FSMContext):
 
     await message.answer(
         f"<b>Заявка опубликована.</b>\n\n"
-        f"Бизнес: {business['business_name']}\n"
+        f"Бизнес: {escape(str(business['business_name']))}\n"
         f"Заявка #{request_id}\n\n"
         "Она уже доступна блогерам в разделе «Проекты».",
         reply_markup=owner_reply_kb()
     )
 
-FORM_BACK_MAP = {
-    "BusinessForm": {
-        "country_choice": "business_name", "region": "country_choice", "city": "region",
-        "work_format": "city", "niche": "work_format", "social_link": "niche", "contact": "social_link",
-    },
-    "CreatorForm": {
-        "photo": "name", "country": "photo", "country_other": "country", "region": "country",
-        "city": "region", "work_format": "city", "travel_scope": "work_format", "niche": "travel_scope",
-        "blog1_platform": "niche", "blog1_link": "blog1_platform", "blog1_followers": "blog1_link",
-        "blog1_reach": "blog1_followers", "add_blog2": "blog1_reach", "blog2_platform": "add_blog2",
-        "blog2_link": "blog2_platform", "blog2_followers": "blog2_link", "blog2_reach": "blog2_followers",
-        "ad_formats": "blog2_reach", "cooperation_formats": "ad_formats", "price_choice": "cooperation_formats",
-        "price": "price_choice", "excluded_topics": "price", "brief_ready": "excluded_topics", "contact": "brief_ready",
-    },
-    "ContentCreatorForm": {
-        "photo": "name", "country": "photo", "country_other": "country", "region": "country",
-        "city": "region", "work_format": "city", "travel_scope": "work_format", "content_types": "travel_scope",
-        "industries": "content_types", "on_camera": "industries", "skills": "on_camera",
-        "portfolio_link": "skills", "delivery_available": "portfolio_link",
-        "cooperation_formats": "delivery_available", "price_choice": "cooperation_formats",
-        "price": "price_choice", "excluded_topics": "price", "contact": "excluded_topics",
-    },
-}
-
-REQUEST_BACK_CONTENT = {
-    "photo": "creator_needed", "content_types": "photo", "task": "content_types",
-    "content_quantity": "task", "on_camera": "content_quantity", "work_format": "on_camera",
-    "geography": "work_format", "requirements": "geography", "creator_skills": "requirements",
-    "product_provided": "creator_skills", "cooperation_format": "product_provided",
-    "budget_choice": "cooperation_format", "budget": "budget_choice",
-    "response_deadline": "budget", "delivery_deadline": "response_deadline", "extra_info": "delivery_deadline",
-}
-
-REQUEST_BACK_BLOGGER = {
-    "photo": "creator_needed", "blogger_geography": "photo", "blogger_niches": "blogger_geography",
-    "blogger_platforms": "blogger_niches", "blogger_followers": "blogger_platforms",
-    "blogger_reach": "blogger_followers", "blogger_ad_formats": "blogger_reach",
-    "blogger_work_format": "blogger_ad_formats", "blogger_task": "blogger_work_format",
-    "blogger_cooperation": "blogger_task", "blogger_budget_choice": "blogger_cooperation",
-    "blogger_budget": "blogger_budget_choice", "blogger_response_deadline": "blogger_budget",
-    "blogger_publication_deadline": "blogger_response_deadline", "blogger_extra": "blogger_publication_deadline",
-}
-
-
-async def go_previous_form_state(state: FSMContext):
-    current = await state.get_state()
-    if not current or ":" not in current:
-        return None
-    group, current_name = current.split(":", 1)
-    if group == "RequestForm":
-        data = await state.get_data()
-        mapping = REQUEST_BACK_BLOGGER if data.get("creator_needed") == "Блогер" else REQUEST_BACK_CONTENT
-    else:
-        mapping = FORM_BACK_MAP.get(group, {})
-    previous = mapping.get(current_name)
-    if not previous:
-        return None
-    cls = globals().get(group)
-    if not cls:
-        return None
-    await state.set_state(getattr(cls, previous))
-    return previous
-
-
 @router.callback_query(F.data == "fix_previous_answer")
 async def fix_previous_answer(callback: CallbackQuery, state: FSMContext):
-    previous = await go_previous_form_state(state)
-    if not previous:
+    data = await state.get_data()
+    history = data.get("_form_history", [])
+    if len(history) < 2:
         await callback.answer("Это первый вопрос анкеты.", show_alert=True)
         return
-    await callback.message.answer(
-        "← Вернулись на предыдущий вопрос. Введите или выберите ответ заново."
-    )
+    history.pop()
+    previous = history[-1]
+    await state.set_state(previous["state"])
+    await state.set_data({**previous["data"], "_form_history": history})
+    markup = InlineKeyboardMarkup.model_validate(previous["markup"]) if previous["markup"] else None
+    await callback.message.answer(previous["text"], reply_markup=markup)
     await callback.answer()
 
 
@@ -3338,7 +3354,7 @@ async def creator_edit_profile(callback: CallbackQuery, state: FSMContext):
         "SELECT creator_type, status FROM creators WHERE user_id=?",
         (callback.from_user.id,)
     ).fetchone()
-    if creator and creator["status"] != "active":
+    if creator and creator["status"] == "pending":
         conn.close()
         await callback.message.answer(
             "Ваш профиль ещё проходит модерацию. После одобрения здесь появятся проекты."
@@ -3665,6 +3681,9 @@ async def blogger_req_budget(message: Message, state: FSMContext):
 
 @router.message(RequestForm.blogger_response_deadline)
 async def blogger_req_response_deadline(message: Message, state: FSMContext):
+    if parse_project_deadline(message.text) is None:
+        await message.answer("Укажите дату откликов, например 30.11.2026 или 30 ноября 2026.")
+        return
     await state.update_data(response_deadline=message.text.strip())
     await state.set_state(RequestForm.blogger_publication_deadline)
     await message.answer(
@@ -3950,6 +3969,9 @@ async def req_budget(message: Message, state: FSMContext):
 
 @router.message(RequestForm.response_deadline)
 async def req_response_deadline(message: Message, state: FSMContext):
+    if parse_project_deadline(message.text) is None:
+        await message.answer("Укажите дату откликов, например 30.11.2026 или 30 ноября 2026.")
+        return
     await state.update_data(response_deadline=message.text.strip())
     await state.set_state(RequestForm.delivery_deadline)
     await message.answer(
@@ -4056,7 +4078,15 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
 @router.callback_query(F.data == "creator_view_requests")
 async def creator_view_requests(callback: CallbackQuery):
     conn = db()
-    requests = conn.execute("SELECT * FROM requests WHERE status='active' ORDER BY request_id DESC LIMIT 10").fetchall()
+    creator = conn.execute("SELECT * FROM creators WHERE user_id=?", (callback.from_user.id,)).fetchone()
+    if not creator or creator["status"] != "active":
+        conn.close()
+        await callback.answer("Проекты доступны после одобрения анкеты.", show_alert=True)
+        return
+    requests = conn.execute(
+        "SELECT * FROM requests WHERE status='active' AND creator_needed=? ORDER BY request_id DESC LIMIT 10",
+        (creator["creator_type"],)
+    ).fetchall()
     conn.close()
     if not requests:
         await callback.message.edit_text("Сейчас активных заявок нет.", reply_markup=creator_menu_kb())
@@ -4073,15 +4103,20 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
     request_id = int(callback.data.split(":")[1])
     conn = db()
     creator = conn.execute("SELECT * FROM creators WHERE user_id=?", (callback.from_user.id,)).fetchone()
-    if not creator:
+    if not creator or creator["status"] != "active":
         conn.close()
-        await callback.answer("Сначала заполните анкету креатора", show_alert=True)
+        await callback.answer("Отклики доступны после одобрения анкеты", show_alert=True)
         return
 
     request = conn.execute("SELECT * FROM requests WHERE request_id=? AND status='active'", (request_id,)).fetchone()
     if not request:
         conn.close()
         await callback.answer("Заявка уже не активна", show_alert=True)
+        return
+
+    if creator["creator_type"] != request["creator_needed"] or not project_distribution_open(request):
+        conn.close()
+        await callback.answer("Приём откликов закрыт или проект для другого типа творца.", show_alert=True)
         return
 
     try:
@@ -4106,19 +4141,13 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
         + "\n\n"
         + creator_card(creator)
     )
-    if creator["photo_file_id"]:
-        await bot.send_photo(
-            request["business_user_id"],
-            creator["photo_file_id"],
-            caption=response_text,
-            reply_markup=business_decision_kb(response_id)
-        )
-    else:
-        await bot.send_message(
-            request["business_user_id"],
-            response_text,
-            reply_markup=business_decision_kb(response_id)
-        )
+    try:
+        if creator["photo_file_id"]:
+            await bot.send_photo(request["business_user_id"], creator["photo_file_id"])
+        await bot.send_message(request["business_user_id"], response_text,
+                               reply_markup=business_decision_kb(response_id))
+    except Exception:
+        logger.exception("Response saved but notification failed: %s", response_id)
 
 
 # ---------- Business accepts/declines ----------
@@ -4131,6 +4160,11 @@ async def accept_response(callback: CallbackQuery, bot: Bot):
     if not response or response["business_user_id"] != callback.from_user.id:
         conn.close()
         await callback.answer("Отклик не найден", show_alert=True)
+        return
+
+    if response["status"] != "new":
+        conn.close()
+        await callback.answer("По отклику уже принято решение.", show_alert=True)
         return
 
     conn.execute("UPDATE responses SET status='accepted' WHERE response_id=?", (response_id,))
@@ -4154,8 +4188,8 @@ async def accept_response(callback: CallbackQuery, bot: Bot):
     await bot.send_message(
         creator["user_id"],
         "Ваш отклик принят 🎉\n\n"
-        f"Бизнес: {request['business_name']}\n"
-        f"Заявка: {request['task']}\n\n"
+        f"Бизнес: {escape(str(request['business_name']))}\n"
+        f"Заявка: {escape(str(request['task']))}\n\n"
         "Контакты бизнеса:\n"
         + business_contacts
     )
@@ -4172,6 +4206,11 @@ async def decline_response(callback: CallbackQuery, bot: Bot):
         await callback.answer("Отклик не найден", show_alert=True)
         return
 
+    if response["status"] != "new":
+        conn.close()
+        await callback.answer("По отклику уже принято решение.", show_alert=True)
+        return
+
     conn.execute("UPDATE responses SET status='declined' WHERE response_id=?", (response_id,))
     request = conn.execute("SELECT * FROM requests WHERE request_id=?", (response["request_id"],)).fetchone()
     conn.commit()
@@ -4181,7 +4220,7 @@ async def decline_response(callback: CallbackQuery, bot: Bot):
     await callback.message.answer("Отклик отклонён.")
     await bot.send_message(
         response["creator_user_id"],
-        f"По заявке #{request['request_id']} бизнес выбрал другого креатора. Новые предложения появятся в боте."
+        f"По заявке #{escape(str(request['request_id']))} бизнес выбрал другого креатора. Новые предложения появятся в боте."
     )
     await callback.answer("Отклонено")
 
@@ -4229,11 +4268,16 @@ async def complete_project(callback: CallbackQuery):
         await callback.answer("Проект не найден", show_alert=True)
         return
 
+    if request["status"] not in {"active", "completed"}:
+        conn.close()
+        await callback.answer("Завершить можно только активный проект.", show_alert=True)
+        return
+
     if request["status"] != "completed":
         conn.execute(
             """
             UPDATE requests
-            SET status='completed', completed_at=?
+            SET status='completed', daily_distribution=0, completed_at=?
             WHERE request_id=? AND business_user_id=?
             """,
             (datetime.now(MSK_TZ).isoformat(), request_id, callback.from_user.id)
@@ -4287,7 +4331,7 @@ async def business_responses(callback: CallbackQuery):
     await callback.message.edit_text("Последние отклики:")
     for r in rows:
         await callback.message.answer(
-            f"Заявка: {r['task']}\nКреатор: {r['name']}\nСоцсети: {r['social_link']}\nСтатус: {r['status']}",
+            f"Заявка: {escape(str(r['task']))}\nКреатор: {escape(str(r['name']))}\nСоцсети: {escape(str(r['social_link']))}\nСтатус: {escape(str(r['status']))}",
             reply_markup=business_decision_kb(r["response_id"]) if r["status"] == "new" else None
         )
     await callback.answer()
@@ -4314,7 +4358,7 @@ async def creator_my_responses(callback: CallbackQuery):
     await callback.message.edit_text("Ваши отклики:")
     for r in rows:
         await callback.message.answer(
-            f"Бизнес: {r['business_name']}\nЗадача: {r['task']}\nСтатус: {r['status']}"
+            f"Бизнес: {escape(str(r['business_name']))}\nЗадача: {escape(str(r['task']))}\nСтатус: {escape(str(r['status']))}"
         )
     await callback.answer()
 
@@ -4358,11 +4402,11 @@ async def business_profile(callback: CallbackQuery):
     else:
         await callback.message.edit_text(
             "<b>Мой профиль</b>\n\n"
-            f"Бизнес: {p['business_name']}\n"
-            f"Город: {p['city']}\n"
-            f"Ниша: {p['niche']}\n"
-            f"Соцсети: {p['social_link']}\n"
-            f"Контакт: {p['contact']}",
+            f"Бизнес: {escape(str(p['business_name']))}\n"
+            f"Город: {escape(str(p['city']))}\n"
+            f"Ниша: {escape(str(p['niche']))}\n"
+            f"Соцсети: {escape(str(p['social_link']))}\n"
+            f"Контакт: {escape(str(p['contact']))}",
             reply_markup=business_menu_kb()
         )
     await callback.answer()
@@ -4387,8 +4431,12 @@ async def creator_profile(callback: CallbackQuery):
 @router.callback_query(F.data == "creator_settings")
 async def creator_settings(callback: CallbackQuery):
     await callback.message.edit_text(
-        "<b>Настройки</b>\n\nСкоро здесь появятся настройки города, уведомлений и форматов сотрудничества.",
-        reply_markup=creator_menu_kb()
+        "<b>Настройки профиля</b>\n\nГород, географию выездов и форматы сотрудничества можно изменить в анкете. "
+        "Обновлённая анкета снова проходит модерацию.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Изменить анкету", callback_data="creator_edit_profile")],
+            [InlineKeyboardButton(text="Мой профиль", callback_data="creator_profile")]
+        ])
     )
     await callback.answer()
 
@@ -4399,7 +4447,7 @@ async def help_section(callback: CallbackQuery):
     await callback.message.edit_text(
         "<b>Помощь</b>\n\n"
         "КЛИК соединяет бизнес и креаторов.\n\n"
-        "Если что-то не получается, напишите администратору проекта. Контакт добавим перед публичным запуском.",
+        "Если что-то не получается, нажмите «Задать вопрос» в меню. Команда КЛИК ответит прямо в этом боте.",
         reply_markup=business_menu_kb() if is_business else creator_menu_kb()
     )
     await callback.answer()
@@ -4419,32 +4467,13 @@ async def send_pending_requests(message: Message):
 
 
 async def broadcast_approved_request(bot: Bot, request_id: int):
+    # Legacy entry point uses the same delivery log and requires manual activation.
     conn = db()
     request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
-    creators = conn.execute(
-        "SELECT * FROM creators WHERE status='pending' AND creator_type=?",
-        (request["creator_needed"],)
-    ).fetchall() if request else []
     conn.close()
-    if not request or request["status"] != "active":
-        return
-    for creator in creators:
-        try:
-            if request["photo_file_id"]:
-                await bot.send_photo(
-                    creator["user_id"],
-                    request["photo_file_id"],
-                    caption="<b>Новая заявка</b>\n\n" + request_card(request),
-                    reply_markup=request_kb(request_id),
-                )
-            else:
-                await bot.send_message(
-                    creator["user_id"],
-                    "<b>Новая заявка</b>\n\n" + request_card(request),
-                    reply_markup=request_kb(request_id),
-                )
-        except Exception:
-            pass
+    if request and request["daily_distribution"]:
+        return await notify_matching_creators(request, bot)
+    return 0
 
 
 @router.message(Command("admin"))
@@ -4642,8 +4671,8 @@ async def owner_media_base_filter(callback: CallbackQuery):
 
 
 @router.message(F.text == "🏢 База бизнесов")
-async def owner_businesses(message: Message):
-    if not is_admin(message.from_user.id):
+async def owner_businesses(message: Message, actor_id: int | None = None):
+    if not is_admin(actor_id if actor_id is not None else message.from_user.id):
         return
     conn = db()
     rows = conn.execute("SELECT * FROM business_profiles ORDER BY user_id DESC LIMIT 30").fetchall()
@@ -4654,15 +4683,24 @@ async def owner_businesses(message: Message):
     await message.answer(f"<b>Бизнесы — {len(rows)} последних</b>", reply_markup=owner_reply_kb())
     for p in rows:
         await message.answer(
-            f"<b>{p['business_name']}</b>\n"
-            f"Город: {p['city']}\nНиша: {p['niche']}\nСоцсети: {p['social_link']}\n"
+            f"<b>{escape(str(p['business_name']))}</b>\n"
+            f"Город: {escape(str(p['city']))}\nНиша: {escape(str(p['niche']))}\nСоцсети: {escape(str(p['social_link']))}\n"
             + contact_line(p["user_id"], p["contact"])
         )
 
 
+@router.callback_query(F.data == "registered_businesses")
+async def registered_businesses(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await owner_businesses(callback.message, actor_id=callback.from_user.id)
+    await callback.answer()
+
+
 @router.message(F.text == "📁 Проекты")
-async def owner_requests(message: Message):
-    if not is_admin(message.from_user.id):
+async def owner_requests(message: Message, actor_id: int | None = None):
+    if not is_admin(actor_id if actor_id is not None else message.from_user.id):
         return
     conn = db()
     rows = conn.execute(
@@ -4686,8 +4724,7 @@ async def owner_requests(message: Message):
     )
     for r in rows:
         status = r["status"] or "pending"
-        daily_on = bool(r["daily_distribution"]) if "daily_distribution" in r.keys() else False
-        distribution_line = "\n📣 Ежедневная рассылка: включена" if status == "active" and daily_on else ""
+        distribution_line = "\n" + distribution_summary(r)
         prefix = f"<b>{status_labels.get(status, status)}</b>{distribution_line}"
         markup = owner_project_kb(r["request_id"], status)
         await send_request_card(message, r, reply_markup=markup, prefix=prefix)
@@ -4698,7 +4735,7 @@ async def admin_requests(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await owner_requests(callback.message)
+    await owner_requests(callback.message, actor_id=callback.from_user.id)
     await callback.answer()
 
 
@@ -4724,8 +4761,8 @@ async def owner_delete_project(callback: CallbackQuery):
 
     await callback.message.answer(
         "<b>Удалить проект?</b>\n\n"
-        f"#{request_id} · {request['business_name']}\n"
-        f"{request['task']}\n\n"
+        f"#{request_id} · {escape(str(request['business_name']))}\n"
+        f"{escape(str(request['task']))}\n\n"
         "Проект и все связанные отклики будут удалены.",
         reply_markup=owner_delete_confirm_kb(request_id)
     )
@@ -4741,6 +4778,7 @@ async def owner_delete_confirm(callback: CallbackQuery):
     request_id = int(callback.data.split(":")[1])
 
     conn = db()
+    conn.execute("DELETE FROM project_delivery_log WHERE request_id=?", (request_id,))
     conn.execute("DELETE FROM responses WHERE request_id=?", (request_id,))
     conn.execute("DELETE FROM requests WHERE request_id=?", (request_id,))
     conn.commit()
@@ -4776,7 +4814,7 @@ async def owner_filter_send(callback: CallbackQuery):
     ).fetchone()
     conn.close()
 
-    if not request:
+    if not request or not project_distribution_open(request):
         await callback.answer("Проект не найден или уже не активен.", show_alert=True)
         return
 
@@ -4791,7 +4829,7 @@ async def owner_filter_send(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("owner_filter_send_confirm:"))
-async def owner_filter_send_confirm(callback: CallbackQuery):
+async def owner_filter_send_confirm(callback: CallbackQuery, bot: Bot):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -4804,7 +4842,7 @@ async def owner_filter_send_confirm(callback: CallbackQuery):
     ).fetchone()
     conn.close()
 
-    if not request:
+    if not request or not project_distribution_open(request):
         await callback.answer("Проект не найден или уже не активен.", show_alert=True)
         return
 
@@ -4816,7 +4854,7 @@ async def owner_filter_send_confirm(callback: CallbackQuery):
     conn.commit()
     conn.close()
 
-    sent = await notify_matching_creators(request)
+    sent = await notify_matching_creators(request, bot)
     await callback.message.edit_text(
         f"📣 Проект #{request_id} отправлен.\nНовых получателей: <b>{sent}</b>.\nЕжедневная рассылка включена до дедлайна."
     )
@@ -4857,9 +4895,9 @@ async def owner_project_responses(callback: CallbackQuery):
     await callback.message.answer(f"<b>Отклики на проект: {len(rows)}</b>")
     for r in rows:
         await callback.message.answer(
-            f"<b>{r['name'] or 'Творец'}</b>\n"
-            f"Роль: {r['creator_type'] or '—'}\n"
-            f"Статус отклика: {r['status'] or 'new'}"
+            f"<b>{escape(str(r['name'] or 'Творец'))}</b>\n"
+            f"Роль: {escape(str(r['creator_type'] or '—'))}\n"
+            f"Статус отклика: {escape(str(r['status'] or 'new'))}"
         )
     await callback.answer()
 
@@ -4871,13 +4909,19 @@ async def owner_complete_project(callback: CallbackQuery):
         return
     request_id = int(callback.data.split(":")[1])
     conn = db()
+    request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
+    if not request or request["status"] not in {"active", "completed"}:
+        conn.close()
+        await callback.answer("Активный проект не найден", show_alert=True)
+        return
     conn.execute(
-        "UPDATE requests SET status='completed', completed_at=? WHERE request_id=?",
+        "UPDATE requests SET status='completed', daily_distribution=0, completed_at=? WHERE request_id=? AND status='active'",
         (datetime.now(MSK_TZ).isoformat(), request_id)
     )
     conn.commit()
     conn.close()
-    await callback.message.answer("Проект завершён. Итоги сохранены.")
+    request, summary = get_project_summary(request_id, request["business_user_id"])
+    await callback.message.answer(project_summary_card(request, summary))
     await callback.answer("Готово")
 
 
@@ -4905,8 +4949,8 @@ async def owner_project_summary(callback: CallbackQuery):
         return
     await callback.message.answer(
         "<b>Итоги проекта</b>\n\n"
-        f"{request['business_name']}\n"
-        f"{request['task']}\n\n"
+        f"{escape(str(request['business_name']))}\n"
+        f"{escape(str(request['task']))}\n\n"
         f"Всего откликов: <b>{counts['total'] or 0}</b>\n"
         f"Принято: <b>{counts['accepted'] or 0}</b>\n"
         f"Отклонено: {counts['declined'] or 0}\n"
@@ -4937,10 +4981,10 @@ async def owner_responses(message: Message):
     for r in rows:
         markup = business_decision_kb(r["response_id"]) if r["status"] == "new" else None
         await message.answer(
-            f"#{r['response_id']} · {r['status']}\n"
-            f"Бизнес: {r['business_name']}\n"
-            f"Блогер: {r['name']}\n"
-            f"Задача: {r['task']}",
+            f"#{escape(str(r['response_id']))} · {escape(str(r['status']))}\n"
+            f"Бизнес: {escape(str(r['business_name']))}\n"
+            f"Блогер: {escape(str(r['name']))}\n"
+            f"Задача: {escape(str(r['task']))}",
             reply_markup=markup
         )
 
@@ -4972,11 +5016,11 @@ async def owner_referrals(message: Message):
         return
     await message.answer("<b>Реферальная статистика</b>", reply_markup=owner_reply_kb())
     for r in rows:
-        username = f"@{r['inviter_username']}" if r['inviter_username'] else "без username"
+        username = f"@{escape(str(r['inviter_username']))}" if r['inviter_username'] else "без username"
         await message.answer(
-            f"<b>{r['inviter_name'] or 'Пользователь'}</b> · {username}\n"
-            f"Приглашено: {r['total']}\n"
-            f"Креаторов: {r['creators'] or 0} · Бизнесов: {r['businesses'] or 0}"
+            f"<b>{escape(str(r['inviter_name'] or 'Пользователь'))}</b> · {username}\n"
+            f"Приглашено: {escape(str(r['total']))}\n"
+            f"Креаторов: {escape(str(r['creators'] or 0))} · Бизнесов: {escape(str(r['businesses'] or 0))}"
         )
 
 
@@ -5206,7 +5250,9 @@ async def send_business_daily_digests(bot: Bot):
                         reply_markup=business_digest_kb()
                     )
                 except Exception:
-                    pass
+                    logger.exception("Digest delivery failed: %s", business_user_id)
+                    conn.close()
+                    continue
 
                 if state:
                     conn.execute(
@@ -5237,7 +5283,7 @@ async def send_business_daily_digests(bot: Bot):
 
 
 
-async def send_daily_project_distributions():
+async def send_daily_project_distributions(bot: Bot):
     """Daily: send active projects only to newly matched creators who never received them before."""
     while True:
         now = datetime.now(MSK_TZ)
@@ -5268,12 +5314,23 @@ async def send_daily_project_distributions():
                         conn.close()
                     continue
 
-                await notify_matching_creators(request)
+                await notify_matching_creators(request, bot)
 
             await asyncio.sleep(3700)
         else:
             await asyncio.sleep(60)
 
+
+
+async def supervise_job(job, bot):
+    while True:
+        try:
+            await job(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Background job failed: %s; retrying", job.__name__)
+            await asyncio.sleep(60)
 
 
 async def main():
@@ -5284,16 +5341,20 @@ async def main():
     if not USE_POSTGRES:
         print("WARNING: DATABASE_URL is missing. SQLite fallback is NOT persistent on Railway redeploys.")
     init_db()
+    init_support_tables()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-    dp = Dispatcher(storage=MemoryStorage())
+    bot.session.middleware(CaptureFormPrompt())
+    from aiogram.fsm.storage.memory import SimpleEventIsolation
+    dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
     dp.include_router(router)
-    digest_task = asyncio.create_task(send_business_daily_digests(bot))
-    project_distribution_task = asyncio.create_task(send_daily_project_distributions())
+    digest_task = asyncio.create_task(supervise_job(send_business_daily_digests, bot))
+    project_distribution_task = asyncio.create_task(supervise_job(send_daily_project_distributions, bot))
     try:
         await dp.start_polling(bot)
     finally:
         digest_task.cancel()
         project_distribution_task.cancel()
+        await asyncio.gather(digest_task, project_distribution_task, return_exceptions=True)
 
 
 if __name__ == "__main__":
