@@ -1179,15 +1179,25 @@ def mark_project_delivered(request_id: int, creator_user_id: int):
         conn.close()
 
 
+BOTH_CREATORS = "Блогер и контент-креатор"
+
+
+def request_accepts_creator(request, creator_type):
+    return request["creator_needed"] == creator_type or (
+        request["creator_needed"] == BOTH_CREATORS
+        and creator_type in {"Блогер", "Контент-креатор"}
+    )
+
+
 def matching_creators_for_request(request, only_unsent: bool = True):
     conn = db()
     rows = conn.execute(
         """
         SELECT * FROM creators
-        WHERE creator_type=?
+        WHERE (creator_type=? OR (?=? AND creator_type IN ('Блогер', 'Контент-креатор')))
           AND COALESCE(status, 'pending')='active'
         """,
-        (request["creator_needed"],)
+        (request["creator_needed"], request["creator_needed"], BOTH_CREATORS)
     ).fetchall()
     conn.close()
 
@@ -1219,7 +1229,7 @@ async def _notify_matching_creators(request, bot: Bot):
     for creator in rows:
         title = (
             "Новый проект для блогеров в КЛИК"
-            if creator_type == "Блогер"
+            if creator["creator_type"] == "Блогер"
             else "Новый проект для контент-креаторов в КЛИК"
         )
 
@@ -1362,7 +1372,8 @@ def request_card(r) -> str:
         )
 
     return (
-        f"<b>ИЩЕМ КОНТЕНТ-КРЕАТОРА</b>\n\n"
+        ("<b>ИЩЕМ БЛОГЕРА И КОНТЕНТ-КРЕАТОРА</b>\n\n" if val("creator_needed") == BOTH_CREATORS else "<b>ИЩЕМ КОНТЕНТ-КРЕАТОРА</b>\n\n")
+        +
         f"<b>{val('business_name')}</b>\n"
         f"📍 {val('city')}\n\n"
         f"<b>Контент:</b> {val('content_types')}\n"
@@ -2524,7 +2535,7 @@ async def project_open_from_notification(callback: CallbackQuery):
     creator = conn.execute("SELECT * FROM creators WHERE user_id=?", (callback.from_user.id,)).fetchone()
     conn.close()
 
-    if not creator or creator["status"] != "active" or (request and creator["creator_type"] != request["creator_needed"]):
+    if not creator or creator["status"] != "active" or (request and not request_accepts_creator(request, creator["creator_type"])):
         await callback.answer("Проект недоступен для вашей анкеты.", show_alert=True)
         return
 
@@ -3427,7 +3438,7 @@ async def create_request_start(callback: CallbackQuery, state: FSMContext):
         "<b>Новая заявка</b>\n\nКого вы ищете?",
         reply_markup=single_choice_kb(
             "req_need",
-            ["Блогера", "Контент-креатора"]
+            ["Блогера", "Контент-креатора", "Блогера и контент-креатора"]
         )
     )
     await callback.answer()
@@ -3435,10 +3446,17 @@ async def create_request_start(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(RequestForm.creator_needed, F.data.startswith("req_need:"))
 async def req_creator_needed(callback: CallbackQuery, state: FSMContext):
-    choice = ["Блогер", "Контент-креатор"][int(callback.data.split(":")[1])]
+    choice = ["Блогер", "Контент-креатор", BOTH_CREATORS][int(callback.data.split(":")[1])]
     await state.update_data(creator_needed=choice)
 
-    if choice == "Контент-креатор":
+    if choice == BOTH_CREATORS:
+        await state.set_state(RequestForm.photo)
+        await callback.message.edit_text(
+            "<b>Новая заявка · поиск блогера и контент-креатора</b>\n\n"
+            "Добавьте <b>1 фото</b> для карточки проекта.\n"
+            "Далее укажем требования к блогерам, контенту и общие условия."
+        )
+    elif choice == "Контент-креатор":
         await state.set_state(RequestForm.photo)
         await callback.message.edit_text(
             "<b>Новая заявка · поиск контент-креатора</b>\n\n"
@@ -3460,7 +3478,14 @@ async def req_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.update_data(photo_file_id=message.photo[-1].file_id)
 
-    if data.get("creator_needed") == "Блогер":
+    if data.get("creator_needed") == BOTH_CREATORS:
+        await state.update_data(blogger_niches_selected=[])
+        await state.set_state(RequestForm.blogger_niches)
+        await message.answer(
+            "<b>Тематика блогов</b>\nМожно выбрать несколько вариантов.",
+            reply_markup=multi_choice_kb("blog_req_niche", BLOGGER_REQUEST_NICHES, [])
+        )
+    elif data.get("creator_needed") == "Блогер":
         await state.set_state(RequestForm.blogger_geography)
         await message.answer(
             "2. <b>География блогера</b>\n\n"
@@ -3578,6 +3603,15 @@ async def blogger_req_ad_formats(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Выберите хотя бы один вариант", show_alert=True)
             return
         await state.update_data(blogger_ad_formats=", ".join(selected))
+        if data.get("creator_needed") == BOTH_CREATORS:
+            await state.update_data(content_types_selected=[])
+            await state.set_state(RequestForm.content_types)
+            await callback.message.edit_text(
+                "<b>Какой контент вам нужен?</b>\nМожно выбрать несколько вариантов.",
+                reply_markup=multi_choice_kb("req_content", REQUEST_CONTENT_TYPES, [])
+            )
+            await callback.answer()
+            return
         await state.set_state(RequestForm.blogger_work_format)
         await callback.message.edit_text(
             "8. <b>Формат сотрудничества по месту</b>",
@@ -3993,6 +4027,15 @@ async def req_delivery_deadline(message: Message, state: FSMContext):
 @router.message(RequestForm.extra_info)
 async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
+    if data.get("creator_needed") == BOTH_CREATORS:
+        data["requirements"] = (
+            f"Блогеры — тематика: {data.get('blogger_niches', '—')}; "
+            f"площадки: {data.get('blogger_platforms', '—')}; "
+            f"подписчики от: {data.get('blogger_followers', '—')}; "
+            f"охват от: {data.get('blogger_reach', '—')}; "
+            f"форматы рекламы: {data.get('blogger_ad_formats', '—')}.\n"
+            f"Требования к контенту: {data.get('requirements', '—')}"
+        )
     extra = message.text.strip()
     if extra.lower() in {"пропустить", "-", "нет"}:
         extra = None
@@ -4054,7 +4097,7 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
         message,
         request,
         reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id)),
-        prefix="<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у контент-креаторов."
+        prefix="<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у блогеров и контент-креаторов." if data.get("creator_needed") == BOTH_CREATORS else "<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у контент-креаторов."
     )
 
     conn = db()
@@ -4084,8 +4127,8 @@ async def creator_view_requests(callback: CallbackQuery):
         await callback.answer("Проекты доступны после одобрения анкеты.", show_alert=True)
         return
     requests = conn.execute(
-        "SELECT * FROM requests WHERE status='active' AND creator_needed=? ORDER BY request_id DESC LIMIT 10",
-        (creator["creator_type"],)
+        "SELECT * FROM requests WHERE status='active' AND creator_needed IN (?, ?) ORDER BY request_id DESC LIMIT 10",
+        (creator["creator_type"], BOTH_CREATORS)
     ).fetchall()
     conn.close()
     if not requests:
@@ -4114,7 +4157,7 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
         await callback.answer("Заявка уже не активна", show_alert=True)
         return
 
-    if creator["creator_type"] != request["creator_needed"] or not project_distribution_open(request):
+    if not request_accepts_creator(request, creator["creator_type"]) or not project_distribution_open(request):
         conn.close()
         await callback.answer("Приём откликов закрыт или проект для другого типа творца.", show_alert=True)
         return
