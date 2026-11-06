@@ -8,6 +8,8 @@ from aiogram import BaseMiddleware
 from aiogram.methods import SendMessage, SendPhoto, EditMessageText, EditMessageReplyMarkup
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 
+prompt_transform = None
+
 active_form = ContextVar('active_form', default=None)
 FORM_GROUPS = {'BusinessForm', 'CreatorForm', 'ContentCreatorForm', 'RequestForm',
                'AdminBusinessForm', 'AdminRequestForm'}
@@ -38,7 +40,7 @@ class FormNavigation(BaseMiddleware):
             result = await handler(event, data)
             current = await state.get_state()
             prompt = context['prompt']
-            if is_form(current) and prompt and getattr(event, 'data', None) != 'fix_previous_answer':
+            if is_form(current) and prompt and getattr(event, 'data', None) != 'fix_previous_answer' and not (current == before and isinstance(event, Message)):
                 current_data = await state.get_data()
                 history = current_data.pop('_form_history', [])
                 # Clearing a form starts a new history, even if its first state is unchanged.
@@ -74,6 +76,11 @@ class CaptureFormPrompt:
                         history = (await context['state'].get_data()).get('_form_history', [])
                         text = history[-1]['text'] if history else None
                     if text:
+                        if prompt_transform:
+                            text, markup = await prompt_transform(current, await context['state'].get_data(), text, method.reply_markup)
+                            method.reply_markup = markup
+                            if hasattr(method, 'text'):
+                                method.text = text
                         context['prompt'] = {'text': text, 'markup': method.reply_markup.model_dump(mode='json')}
         if isinstance(method, SendPhoto) and len(method.caption or '') > 1024:
             text, markup = method.caption, method.reply_markup

@@ -4,6 +4,9 @@ import sqlite3
 import logging
 from html import escape
 from form_navigation import FormNavigation, CaptureFormPrompt
+from interface_v39 import Interface
+from owner_interface import OwnerInterface, StyleMessages
+from persistent_state import PersistentStorage
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -512,7 +515,7 @@ def is_admin(user_id: int) -> bool:
 
 def main_menu_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Я креатор", callback_data="role_creator_intro")
+    kb.button(text="Я блогер / контент-креатор", callback_data="role_creator_intro")
     kb.button(text="Я бизнес", callback_data="role_business_intro")
     kb.button(text="Как это работает", callback_data="how_it_works")
     kb.adjust(1)
@@ -539,14 +542,14 @@ def admin_businesses_kb():
     kb.button(text="➕ Добавить бизнес", callback_data="admin_business_add")
     kb.button(text="📋 Все бизнесы", callback_data="admin_business_list")
     kb.button(text="🏢 Зарегистрированные бизнесы", callback_data="registered_businesses")
-    kb.button(text="➕ Создать заявку", callback_data="admin_request_choose_business")
+    kb.button(text="➕ Создать проект", callback_data="admin_request_choose_business")
     kb.adjust(1)
     return kb.as_markup()
 
 
 def admin_business_card_kb(business_id: int):
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Создать заявку", callback_data=f"admin_request_for:{business_id}")
+    kb.button(text="➕ Создать проект", callback_data=f"admin_request_for:{business_id}")
     kb.button(text="✏️ Редактировать", callback_data=f"admin_business_edit:{business_id}")
     kb.adjust(1)
     return kb.as_markup()
@@ -566,10 +569,20 @@ def multi_choice_kb(prefix: str, options: list[str], selected: list[str]):
     for i, option in enumerate(options):
         mark = "✓ " if option in selected else ""
         kb.button(text=f"{mark}{option}", callback_data=f"{prefix}:{i}")
-    kb.button(text="Готово", callback_data=f"{prefix}:done")
-    kb.button(text="← Исправить ответ", callback_data="fix_previous_answer")
-    kb.adjust(2)
-    return kb.as_markup()
+    buttons = [b for row in kb.export() for b in row]
+    rows = []
+    pending = []
+    for b in buttons:
+        if len(b.text) > 17:
+            if pending: rows.append(pending); pending = []
+            rows.append([b])
+        else:
+            pending.append(b)
+            if len(pending) == 2: rows.append(pending); pending = []
+    if pending: rows.append(pending)
+    rows.append([InlineKeyboardButton(text="✅ ГОТОВО", callback_data=f"{prefix}:done", style="success")])
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data="fix_previous_answer")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 BLOG_NICHES = [
@@ -650,13 +663,12 @@ def business_intro_kb():
 
 def business_menu_kb(show_owner_return: bool = False):
     kb = InlineKeyboardBuilder()
-    kb.button(text="Создать заявку", callback_data="business_create_request")
-    kb.button(text="Мои заявки", callback_data="business_my_requests")
-    kb.button(text="Отклики творцов", callback_data="business_responses")
-    kb.button(text="Мой профиль", callback_data="business_profile")
-    kb.button(text="Изменить профиль", callback_data="business_edit_profile")
-    kb.button(text="Пригласить", callback_data="my_referral")
-    kb.button(text="Задать вопрос", callback_data="support_start")
+    kb.button(text="➕ Создать проект", callback_data="business_create_request", style="success")
+    kb.button(text="📁 Мои проекты", callback_data="business_my_requests")
+    kb.button(text="💬 Отклики", callback_data="business_responses")
+    kb.button(text="👤 Профиль бизнеса", callback_data="business_profile")
+    kb.button(text="🎁 Пригласить", callback_data="my_referral")
+    kb.button(text="❓ Помощь", callback_data="support_start")
     if show_owner_return:
         kb.button(text="Вернуться в панель владельца", callback_data="owner_return")
     kb.adjust(1)
@@ -665,26 +677,26 @@ def business_menu_kb(show_owner_return: bool = False):
 
 def creator_menu_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Проекты", callback_data="creator_view_requests")
-    kb.button(text="Мои отклики", callback_data="creator_my_responses")
-    kb.button(text="Мой профиль", callback_data="creator_profile")
-    kb.button(text="Изменить профиль", callback_data="creator_edit_profile")
-    kb.button(text="Пригласить", callback_data="my_referral")
-    kb.button(text="Настройки", callback_data="creator_settings")
-    kb.button(text="Задать вопрос", callback_data="support_start")
+    for text, action in [("🔎 Найти проект", "creator_view_requests"), ("💬 Мои отклики", "creator_my_responses"),
+                         ("👤 Мой профиль", "creator_profile"), ("🔔 Уведомления", "creator_settings"),
+                         ("🎁 Пригласить", "my_referral"), ("❓ Помощь", "support_start")]:
+        kb.button(text=text, callback_data=action)
     kb.adjust(1)
     return kb.as_markup()
 
+
 def request_kb(request_id: int):
     kb = InlineKeyboardBuilder()
-    kb.button(text="Откликнуться", callback_data=f"respond:{request_id}")
+    kb.button(text="Откликнуться", callback_data=f"respond:{request_id}", style="success")
+    kb.button(text="← К проектам", callback_data="creator_view_requests")
+    kb.button(text="🏠 В меню", callback_data="ui:home")
     kb.adjust(1)
     return kb.as_markup()
 
 
 def business_project_kb(request_id: int, status: str):
     kb = InlineKeyboardBuilder()
-    kb.button(text="Посмотреть отклики", callback_data="business_responses")
+    kb.button(text="Посмотреть отклики", callback_data=f"ui:responses:{request_id}:0")
     if status == "active":
         kb.button(text="Завершить проект", callback_data=f"complete_project:{request_id}")
     if status == "completed":
@@ -710,7 +722,7 @@ def business_decision_kb(response_id: int):
 
 def admin_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Заявки на модерацию", callback_data="admin_moderation")
+    kb.button(text="Проекты на модерацию", callback_data="admin_moderation")
     kb.button(text="Статистика", callback_data="admin_stats")
     kb.button(text="Проекты", callback_data="admin_requests")
     kb.button(text="Выгрузить Excel", callback_data="admin_export")
@@ -773,7 +785,7 @@ def profile_moderation_kb():
     kb.button(text="🏢 Регистрация бизнесов", callback_data="profile_mod:business")
     kb.button(text="👤 Регистрация блогеров", callback_data="profile_mod:blogger")
     kb.button(text="🎬 Регистрация контент-креаторов", callback_data="profile_mod:content")
-    kb.button(text="📋 Заявки бизнеса", callback_data="profile_mod:projects")
+    kb.button(text="📋 Проекты бизнеса", callback_data="profile_mod:projects")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -886,7 +898,7 @@ def owner_reply_kb():
             [KeyboardButton(text="📁 Проекты"), KeyboardButton(text="💬 Все отклики")],
             [KeyboardButton(text="📥 Выгрузить Excel"), KeyboardButton(text="📣 Рассылка")],
             [KeyboardButton(text="💬 Сообщения"), KeyboardButton(text="🔗 Рефералы")],
-            [KeyboardButton(text="👤 Режим пользователя")],
+            [KeyboardButton(text="🔎 Поиск"), KeyboardButton(text="👤 Режим пользователя")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -1201,7 +1213,7 @@ def matching_creators_for_request(request, only_unsent: bool = True):
     ).fetchall()
     conn.close()
 
-    matched = [creator for creator in rows if creator_matches_request_geo(creator, request)]
+    matched = [creator for creator in rows if creator_matches_request_geo(creator, request) and not ui.one("SELECT user_id FROM ui_preferences WHERE user_id=? AND projects=0", (creator["user_id"],))]
     if only_unsent:
         matched = [
             creator for creator in matched
@@ -1349,6 +1361,9 @@ def distribution_summary(request):
 
 
 def request_card(r) -> str:
+    r = dict(r)
+    if 'бартер' in str(r.get('cooperation_format', '')).lower() and str(r.get('budget', '')).strip() in {'0', '0 ₽', '0 руб', '0 руб.'}:
+        r['budget'] = 'Товар / услуга по условиям проекта'
     def val(key, fallback="—"):
         try:
             return escape(str(r[key] or fallback))
@@ -1485,12 +1500,7 @@ async def start(message: Message, state: FSMContext):
 
     # Владелец всегда попадает сразу в админ-панель.
     if is_admin(message.from_user.id):
-        await message.answer(
-            "<b>КЛИК | Панель владельца</b>\n\n"
-            "Здесь закреплены модерация, базы, статистика и выгрузка Excel.\n"
-            "Для проверки пользовательского сценария нажмите «👤 Режим пользователя».",
-            reply_markup=owner_reply_kb(),
-        )
+        await owner_ui.dashboard(message, message.from_user.id)
         return
 
     conn = db()
@@ -1564,7 +1574,7 @@ async def role_business_intro(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text(
         "<b>Найдём вам подходящих креаторов.</b>\n\n"
-        "Создайте профиль бизнеса, а затем разместите заявку: укажите город, задачу и условия сотрудничества.\n\n"
+        "Создайте профиль бизнеса, а затем разместите проект: укажите город, задачу и условия сотрудничества.\n\n"
         "Креаторы смогут откликнуться, а вы — <b>принять или отклонить отклик</b>.",
         reply_markup=business_intro_kb()
     )
@@ -1662,6 +1672,8 @@ async def business_social(message: Message, state: FSMContext):
 
 @router.message(BusinessForm.contact)
 async def business_contact(message: Message, state: FSMContext):
+    if await ui.preview(message, state, "business_contact", "contact"):
+        return
     data = await state.get_data()
     upsert_user(message, "business")
     conn = db()
@@ -1992,6 +2004,8 @@ async def cc_excluded(message: Message, state: FSMContext):
 
 @router.message(ContentCreatorForm.contact)
 async def cc_contact(message: Message, state: FSMContext):
+    if await ui.preview(message, state, "cc_contact", "contact"):
+        return
     data = await state.get_data()
     upsert_user(message, "creator")
     conn = db()
@@ -2389,6 +2403,8 @@ async def creator_brief(callback: CallbackQuery, state: FSMContext):
 
 @router.message(CreatorForm.contact)
 async def creator_contact(message: Message, state: FSMContext):
+    if await ui.preview(message, state, "creator_contact", "contact"):
+        return
     data = await state.get_data()
     upsert_user(message, "creator")
     conn = db()
@@ -2539,15 +2555,11 @@ async def project_open_from_notification(callback: CallbackQuery):
         await callback.answer("Проект недоступен для вашей анкеты.", show_alert=True)
         return
 
-    if not request:
-        await callback.answer("Эта заявка уже недоступна.", show_alert=True)
+    if not request or not project_distribution_open(request):
+        await callback.answer("Приём откликов по этому проекту закрыт.", show_alert=True)
         return
 
-    await send_request_card(
-        callback.message,
-        request,
-        reply_markup=request_kb(request_id)
-    )
+    await ui.detail(callback, request_id)
     await callback.answer()
 
 
@@ -2816,7 +2828,7 @@ async def profile_moderation_menu(message: Message):
         f"Регистрация бизнесов — {businesses}\n"
         f"Регистрация блогеров — {bloggers}\n"
         f"Регистрация контент-креаторов — {content}\n"
-        f"Заявки бизнеса — {projects}",
+        f"Проекты бизнеса — {projects}",
         reply_markup=profile_moderation_kb()
     )
 
@@ -2875,14 +2887,14 @@ async def show_next_profile_for_moderation(message: Message, kind: str):
 
     if not row:
         await message.answer(
-            "В этой очереди больше нет заявок ✅",
+            "В этой очереди больше нет проектов ✅",
             reply_markup=profile_moderation_kb()
         )
         return
 
     if kind == "business":
         text = (
-            "<b>Заявка бизнеса</b>\n\n"
+            "<b>Проект бизнеса</b>\n\n"
             f"Название: {escape(str(row['business_name'] or '—'))}\n"
             f"Город: {escape(str(row['city'] or '—'))}\n"
             f"Ниша: {escape(str(row['niche'] or '—'))}\n"
@@ -2895,7 +2907,7 @@ async def show_next_profile_for_moderation(message: Message, kind: str):
             reply_markup=profile_mod_decision_kb("business", row["user_id"])
         )
     else:
-        prefix = "Заявка блогера" if kind == "blogger" else "Заявка контент-креатора"
+        prefix = "Проект блогера" if kind == "blogger" else "Проект контент-креатора"
         text_prefix = f"<b>{prefix}</b>\n\n<b>Осталось: {remaining}</b>"
         if row["photo_file_id"]:
             await message.answer_photo(
@@ -2922,13 +2934,13 @@ async def show_next_project_for_moderation(message: Message):
 
     if not row:
         await message.answer(
-            "Заявок бизнеса на модерации больше нет ✅",
+            "Проектов бизнеса на модерации больше нет ✅",
             reply_markup=profile_moderation_kb()
         )
         return
 
     await message.answer(
-        f"<b>Заявка бизнеса</b>\nОсталось: <b>{remaining}</b>"
+        f"<b>Проект бизнеса</b>\nОсталось: <b>{remaining}</b>"
     )
     await send_request_card(
         message,
@@ -3072,7 +3084,7 @@ async def owner_business_tools(message: Message):
         return
     await message.answer(
         "<b>Бизнесы</b>\n\n"
-        "Добавляйте бизнесы вручную и создавайте от их имени заявки.",
+        "Добавляйте бизнесы вручную и создавайте от их имени проекта.",
         reply_markup=admin_businesses_kb()
     )
 
@@ -3133,6 +3145,8 @@ async def admin_business_social(message: Message, state: FSMContext):
 @router.message(AdminBusinessForm.contact)
 async def admin_business_contact(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
+        return
+    if await ui.preview(message, state, "admin_business_contact", "contact"):
         return
     data = await state.get_data()
     conn = db()
@@ -3250,8 +3264,8 @@ async def admin_request_for_business(callback: CallbackQuery, state: FSMContext)
     await state.update_data(admin_business_id=business_id)
     await state.set_state(AdminRequestForm.title)
     await callback.message.answer(
-        f"<b>Новая заявка от {escape(str(business['business_name']))}</b>\n\n"
-        "Короткий заголовок заявки:"
+        f"<b>Новый проект от {escape(str(business['business_name']))}</b>\n\n"
+        "Короткий заголовок проекты:"
     )
     await callback.answer()
 
@@ -3289,6 +3303,8 @@ async def admin_request_budget(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
 
+    if await ui.preview(message, state, "admin_request_budget", "budget"):
+        return
     data = await state.get_data()
     conn = db()
     business = conn.execute(
@@ -3333,10 +3349,10 @@ async def admin_request_budget(message: Message, state: FSMContext):
     await state.clear()
 
     await message.answer(
-        f"<b>Заявка опубликована.</b>\n\n"
+        f"<b>Проект отправлен на модерацию.</b>\n\n"
         f"Бизнес: {escape(str(business['business_name']))}\n"
-        f"Заявка #{request_id}\n\n"
-        "Она уже доступна блогерам в разделе «Проекты».",
+        f"Проект #{request_id}\n\n"
+        "После одобрения проект появится в каталоге. Рассылку запускает владелец.",
         reply_markup=owner_reply_kb()
     )
 
@@ -3435,7 +3451,7 @@ async def create_request_start(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(RequestForm.creator_needed)
     await callback.message.edit_text(
-        "<b>Новая заявка</b>\n\nКого вы ищете?",
+        "<b>Новый проект</b>\n\nКого вы ищете?",
         reply_markup=single_choice_kb(
             "req_need",
             ["Блогера", "Контент-креатора", "Блогера и контент-креатора"]
@@ -3452,21 +3468,21 @@ async def req_creator_needed(callback: CallbackQuery, state: FSMContext):
     if choice == BOTH_CREATORS:
         await state.set_state(RequestForm.photo)
         await callback.message.edit_text(
-            "<b>Новая заявка · поиск блогера и контент-креатора</b>\n\n"
+            "<b>Новый проект · поиск блогера и контент-креатора</b>\n\n"
             "Добавьте <b>1 фото</b> для карточки проекта.\n"
             "Далее укажем требования к блогерам, контенту и общие условия."
         )
     elif choice == "Контент-креатор":
         await state.set_state(RequestForm.photo)
         await callback.message.edit_text(
-            "<b>Новая заявка · поиск контент-креатора</b>\n\n"
+            "<b>Новый проект · поиск контент-креатора</b>\n\n"
             "1. Добавьте <b>1 фото</b> для карточки проекта.\n\n"
             "Это может быть товар, заведение, продукт или визуал бренда."
         )
     else:
         await state.set_state(RequestForm.photo)
         await callback.message.edit_text(
-            "<b>Новая заявка · поиск блогера</b>\n\n"
+            "<b>Новый проект · поиск блогера</b>\n\n"
             "1. Добавьте <b>1 фото</b> для карточки проекта.\n\n"
             "Это может быть товар, заведение, продукт или визуал бренда."
         )
@@ -3489,7 +3505,8 @@ async def req_photo(message: Message, state: FSMContext):
         await state.set_state(RequestForm.blogger_geography)
         await message.answer(
             "2. <b>География блогера</b>\n\n"
-            "Например: Москва / Краснодарский край / вся Россия / неважно."
+            "Напишите город или регион либо нажмите «Неважно».",
+            reply_markup=single_choice_kb("quick_blog_geo", ["Неважно"])
         )
     else:
         await state.update_data(content_types_selected=[])
@@ -3502,7 +3519,7 @@ async def req_photo(message: Message, state: FSMContext):
 
 @router.message(RequestForm.photo)
 async def req_photo_invalid(message: Message):
-    await message.answer("Пришлите, пожалуйста, одно фото для карточки заявки.")
+    await message.answer("Пришлите, пожалуйста, одно фото для карточки проекта.")
 
 
 
@@ -3558,7 +3575,8 @@ async def blogger_req_platforms(callback: CallbackQuery, state: FSMContext):
         await state.set_state(RequestForm.blogger_followers)
         await callback.message.edit_text(
             "5. <b>Минимальное количество подписчиков</b>\n\n"
-            "Напишите число или «неважно»."
+            "Напишите число или нажмите «Неважно».",
+            reply_markup=single_choice_kb("blog_req_followers_any", ["Неважно"])
         )
         await callback.answer()
         return
@@ -3574,22 +3592,43 @@ async def blogger_req_platforms(callback: CallbackQuery, state: FSMContext):
 
 @router.message(RequestForm.blogger_followers)
 async def blogger_req_followers(message: Message, state: FSMContext):
-    await state.update_data(blogger_followers=message.text.strip())
+    await save_blogger_followers(message, state, message.text.strip())
+
+
+async def save_blogger_followers(message: Message, state: FSMContext, value: str):
+    await state.update_data(blogger_followers=value)
     await state.set_state(RequestForm.blogger_reach)
     await message.answer(
         "6. <b>Минимальный средний охват</b>\n\n"
-        "Напишите число или «неважно»."
+        "Напишите число или нажмите «Неважно».",
+        reply_markup=single_choice_kb("blog_req_reach_any", ["Неважно"])
     )
 
 
 @router.message(RequestForm.blogger_reach)
 async def blogger_req_reach(message: Message, state: FSMContext):
-    await state.update_data(blogger_reach=message.text.strip(), blogger_ad_formats_selected=[])
+    await save_blogger_reach(message, state, message.text.strip())
+
+
+async def save_blogger_reach(message: Message, state: FSMContext, value: str):
+    await state.update_data(blogger_reach=value, blogger_ad_formats_selected=[])
     await state.set_state(RequestForm.blogger_ad_formats)
     await message.answer(
         "7. <b>Какие рекламные форматы нужны?</b>\nМожно выбрать несколько вариантов.",
         reply_markup=multi_choice_kb("blog_req_ad", BLOGGER_REQUEST_AD_FORMATS, [])
     )
+
+
+@router.callback_query(RequestForm.blogger_followers, F.data == "blog_req_followers_any:0")
+async def blogger_followers_any(callback: CallbackQuery, state: FSMContext):
+    await save_blogger_followers(callback.message, state, "Неважно")
+    await callback.answer()
+
+
+@router.callback_query(RequestForm.blogger_reach, F.data == "blog_req_reach_any:0")
+async def blogger_reach_any(callback: CallbackQuery, state: FSMContext):
+    await save_blogger_reach(callback.message, state, "Неважно")
+    await callback.answer()
 
 
 @router.callback_query(RequestForm.blogger_ad_formats, F.data.startswith("blog_req_ad:"))
@@ -3718,7 +3757,11 @@ async def blogger_req_response_deadline(message: Message, state: FSMContext):
     if parse_project_deadline(message.text) is None:
         await message.answer("Укажите дату откликов, например 30.11.2026 или 30 ноября 2026.")
         return
-    await state.update_data(response_deadline=message.text.strip())
+    parsed = parse_project_deadline(message.text)
+    if parsed < datetime.now(MSK_TZ).date():
+        await message.answer("Дата уже прошла. Укажите сегодняшнюю или будущую дату.")
+        return
+    await state.update_data(response_deadline=parsed.strftime('%d.%m.%Y'))
     await state.set_state(RequestForm.blogger_publication_deadline)
     await message.answer(
         "13. <b>Когда должна выйти публикация / интеграция?</b>\n"
@@ -3728,16 +3771,19 @@ async def blogger_req_response_deadline(message: Message, state: FSMContext):
 
 @router.message(RequestForm.blogger_publication_deadline)
 async def blogger_req_publication_deadline(message: Message, state: FSMContext):
-    await state.update_data(delivery_deadline=message.text.strip())
+    await state.update_data(delivery_deadline=parse_project_deadline(message.text).strftime("%d.%m.%Y") if parse_project_deadline(message.text) else message.text.strip())
     await state.set_state(RequestForm.blogger_extra)
     await message.answer(
         "14. <b>Дополнительная информация</b>\n\n"
-        "Напишите важные детали или отправьте «Пропустить»."
+        "Напишите важные детали или нажмите «Пропустить».",
+        reply_markup=single_choice_kb("quick_extra", ["Пропустить"])
     )
 
 
 @router.message(RequestForm.blogger_extra)
 async def blogger_req_extra(message: Message, state: FSMContext, bot: Bot):
+    if await ui.preview(message, state, "blogger_req_extra", "extra_info"):
+        return
     data = await state.get_data()
     extra = message.text.strip()
     if extra.lower() in {"пропустить", "-", "нет"}:
@@ -3798,7 +3844,7 @@ async def blogger_req_extra(message: Message, state: FSMContext, bot: Bot):
         message,
         request,
         reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id)),
-        prefix="<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у блогеров."
+        prefix="<b>Проект отправлен на модерацию.</b>\nПосле одобрения он появится у блогеров."
     )
 
     conn = db()
@@ -3888,7 +3934,8 @@ async def req_work(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RequestForm.geography)
     await callback.message.edit_text(
         "7. <b>География проекта / кого рассматриваете?</b>\n\n"
-        "Например: Москва / Санкт-Петербург и ЛО / вся Россия / любая страна."
+        "Напишите город или регион либо нажмите «Неважно».",
+        reply_markup=single_choice_kb("quick_geo", ["Неважно"])
     )
     await callback.answer()
 
@@ -3900,7 +3947,8 @@ async def req_geography(message: Message, state: FSMContext):
     await message.answer(
         "8. <b>Есть ли требования к креатору?</b>\n\n"
         "Возраст, пол, внешность, опыт, тематика портфолио и т. д.\n"
-        "Если требований нет — напишите «Нет»."
+        "Напишите требования или нажмите «Нет требований».",
+        reply_markup=single_choice_kb("quick_requirements", ["Нет требований"])
     )
 
 
@@ -3986,7 +4034,7 @@ async def req_budget_choice(callback: CallbackQuery, state: FSMContext):
         await state.set_state(RequestForm.response_deadline)
         await callback.message.edit_text(
             "13. <b>До какого числа принимаете отклики?</b>\n"
-            "Напишите дату, например: 30 июля."
+            "Выберите дату или напишите её с годом."
         )
     await callback.answer()
 
@@ -3997,7 +4045,7 @@ async def req_budget(message: Message, state: FSMContext):
     await state.set_state(RequestForm.response_deadline)
     await message.answer(
         "13. <b>До какого числа принимаете отклики?</b>\n"
-        "Напишите дату, например: 30 июля."
+        "Выберите дату или напишите её с годом."
     )
 
 
@@ -4006,7 +4054,11 @@ async def req_response_deadline(message: Message, state: FSMContext):
     if parse_project_deadline(message.text) is None:
         await message.answer("Укажите дату откликов, например 30.11.2026 или 30 ноября 2026.")
         return
-    await state.update_data(response_deadline=message.text.strip())
+    parsed = parse_project_deadline(message.text)
+    if parsed < datetime.now(MSK_TZ).date():
+        await message.answer("Дата уже прошла. Укажите сегодняшнюю или будущую дату.")
+        return
+    await state.update_data(response_deadline=parsed.strftime('%d.%m.%Y'))
     await state.set_state(RequestForm.delivery_deadline)
     await message.answer(
         "14. <b>Когда нужно сдать готовый контент?</b>\n"
@@ -4016,16 +4068,19 @@ async def req_response_deadline(message: Message, state: FSMContext):
 
 @router.message(RequestForm.delivery_deadline)
 async def req_delivery_deadline(message: Message, state: FSMContext):
-    await state.update_data(delivery_deadline=message.text.strip())
+    await state.update_data(delivery_deadline=parse_project_deadline(message.text).strftime("%d.%m.%Y") if parse_project_deadline(message.text) else message.text.strip())
     await state.set_state(RequestForm.extra_info)
     await message.answer(
         "15. <b>Дополнительная информация</b>\n\n"
-        "Напишите важные детали или отправьте «Пропустить»."
+        "Напишите важные детали или нажмите «Пропустить».",
+        reply_markup=single_choice_kb("quick_extra", ["Пропустить"])
     )
 
 
 @router.message(RequestForm.extra_info)
 async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
+    if await ui.preview(message, state, "req_extra_info", "extra_info"):
+        return
     data = await state.get_data()
     if data.get("creator_needed") == BOTH_CREATORS:
         data["requirements"] = (
@@ -4097,7 +4152,7 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
         message,
         request,
         reply_markup=business_menu_kb(show_owner_return=is_admin(message.from_user.id)),
-        prefix="<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у блогеров и контент-креаторов." if data.get("creator_needed") == BOTH_CREATORS else "<b>Заявка отправлена на модерацию.</b>\nПосле одобрения она появится у контент-креаторов."
+        prefix="<b>Проект отправлен на модерацию.</b>\nПосле одобрения он появится у блогеров и контент-креаторов." if data.get("creator_needed") == BOTH_CREATORS else "<b>Проект отправлен на модерацию.</b>\nПосле одобрения он появится у контент-креаторов."
     )
 
     conn = db()
@@ -4118,6 +4173,29 @@ async def req_extra_info(message: Message, state: FSMContext, bot: Bot):
             pass
 
 
+@router.callback_query(F.data.in_({"quick_blog_geo:0", "quick_geo:0", "quick_requirements:0", "quick_extra:0"}))
+async def request_quick_answer(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    current = await state.get_state()
+    routes = {
+        (RequestForm.blogger_geography.state, "quick_blog_geo:0"): (blogger_req_geography, "Неважно", False),
+        (RequestForm.geography.state, "quick_geo:0"): (req_geography, "Неважно", False),
+        (RequestForm.requirements.state, "quick_requirements:0"): (req_requirements, "Нет требований", False),
+        (RequestForm.blogger_extra.state, "quick_extra:0"): (blogger_req_extra, "Пропустить", True),
+        (RequestForm.extra_info.state, "quick_extra:0"): (req_extra_info, "Пропустить", True),
+    }
+    route = routes.get((current, callback.data))
+    if not route:
+        await callback.answer("Этот вопрос уже пройден.")
+        return
+    handler, value, needs_bot = route
+    message = callback.message.model_copy(update={"text": value, "from_user": callback.from_user})
+    if needs_bot:
+        await handler(message, state, bot)
+    else:
+        await handler(message, state)
+    await callback.answer()
+
+
 @router.callback_query(F.data == "creator_view_requests")
 async def creator_view_requests(callback: CallbackQuery):
     conn = db()
@@ -4127,15 +4205,16 @@ async def creator_view_requests(callback: CallbackQuery):
         await callback.answer("Проекты доступны после одобрения анкеты.", show_alert=True)
         return
     requests = conn.execute(
-        "SELECT * FROM requests WHERE status='active' AND creator_needed IN (?, ?) ORDER BY request_id DESC LIMIT 10",
+        "SELECT * FROM requests WHERE status='active' AND creator_needed IN (?, ?) ORDER BY request_id DESC",
         (creator["creator_type"], BOTH_CREATORS)
     ).fetchall()
     conn.close()
+    requests = [r for r in requests if project_distribution_open(r)][:10]
     if not requests:
-        await callback.message.edit_text("Сейчас активных заявок нет.", reply_markup=creator_menu_kb())
+        await callback.message.edit_text("Сейчас активных проектов нет.", reply_markup=creator_menu_kb())
         await callback.answer()
         return
-    await callback.message.edit_text("Активные заявки:")
+    await callback.message.edit_text("Активные проекты:")
     for r in requests:
         await send_request_card(callback.message, r, reply_markup=request_kb(r["request_id"]))
     await callback.answer()
@@ -4154,7 +4233,7 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
     request = conn.execute("SELECT * FROM requests WHERE request_id=? AND status='active'", (request_id,)).fetchone()
     if not request:
         conn.close()
-        await callback.answer("Заявка уже не активна", show_alert=True)
+        await callback.answer("Проект уже не активен", show_alert=True)
         return
 
     if not request_accepts_creator(request, creator["creator_type"]) or not project_distribution_open(request):
@@ -4171,15 +4250,19 @@ async def respond_to_request(callback: CallbackQuery, bot: Bot):
         conn.commit()
     except (sqlite3.IntegrityError, psycopg.IntegrityError):
         conn.close()
-        await callback.answer("Вы уже откликались на эту заявку", show_alert=True)
+        await callback.answer("Вы уже откликались на этот проект", show_alert=True)
         return
     conn.close()
 
     await callback.answer("Отклик отправлен")
-    await callback.message.answer("Ваш отклик отправлен бизнесу.")
+    await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отклик отправлен", callback_data="ui:sent")],
+        [InlineKeyboardButton(text="← К проектам", callback_data="creator_view_requests")]
+    ]))
+    await callback.message.answer("Ваш отклик отправлен бизнесу.", reply_markup=creator_menu_kb())
 
     response_text = (
-        "<b>Новый отклик на вашу заявку</b>\n\n"
+        "<b>Новый отклик на ваш проект</b>\n\n"
         + request_card(request)
         + "\n\n"
         + creator_card(creator)
@@ -4219,7 +4302,7 @@ async def accept_response(callback: CallbackQuery, bot: Bot):
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        "Отклик принят. Контакты блогера:\n\n" + contact_line(creator["user_id"], creator["contact"])
+        "Отклик принят. Контакты креатора:\n\n" + contact_line(creator["user_id"], creator["contact"])
     )
 
     if business:
@@ -4232,7 +4315,7 @@ async def accept_response(callback: CallbackQuery, bot: Bot):
         creator["user_id"],
         "Ваш отклик принят 🎉\n\n"
         f"Бизнес: {escape(str(request['business_name']))}\n"
-        f"Заявка: {escape(str(request['task']))}\n\n"
+        f"Проект: {escape(str(request['task']))}\n\n"
         "Контакты бизнеса:\n"
         + business_contacts
     )
@@ -4263,7 +4346,7 @@ async def decline_response(callback: CallbackQuery, bot: Bot):
     await callback.message.answer("Отклик отклонён.")
     await bot.send_message(
         response["creator_user_id"],
-        f"По заявке #{escape(str(request['request_id']))} бизнес выбрал другого креатора. Новые предложения появятся в боте."
+        f"По проекту #{escape(str(request['request_id']))} ваш отклик отклонён. Другие предложения доступны в разделе «Найти проект»."
     )
     await callback.answer("Отклонено")
 
@@ -4279,10 +4362,10 @@ async def business_my_requests(callback: CallbackQuery):
     ).fetchall()
     conn.close()
     if not rows:
-        await callback.message.edit_text("У вас пока нет заявок.", reply_markup=business_menu_kb())
+        await callback.message.edit_text("У вас пока нет проектов.", reply_markup=business_menu_kb())
         await callback.answer()
         return
-    await callback.message.edit_text("Ваши заявки:")
+    await callback.message.edit_text("Ваши проекты:")
     for r in rows:
         await send_request_card(
             callback.message,
@@ -4374,7 +4457,7 @@ async def business_responses(callback: CallbackQuery):
     await callback.message.edit_text("Последние отклики:")
     for r in rows:
         await callback.message.answer(
-            f"Заявка: {escape(str(r['task']))}\nКреатор: {escape(str(r['name']))}\nСоцсети: {escape(str(r['social_link']))}\nСтатус: {escape(str(r['status']))}",
+            f"Проект: {escape(str(r['task']))}\nКреатор: {escape(str(r['name']))}\nСоцсети: {escape(str(r['social_link']))}\nСтатус: {escape(str(r['status']))}",
             reply_markup=business_decision_kb(r["response_id"]) if r["status"] == "new" else None
         )
     await callback.answer()
@@ -4553,7 +4636,7 @@ async def moderate_approve(callback: CallbackQuery, bot: Bot):
     request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
     if not request or request["status"] != "pending":
         conn.close()
-        await callback.answer("Заявка уже обработана", show_alert=True)
+        await callback.answer("Проект уже обработан", show_alert=True)
         return
     conn.execute(
         "UPDATE requests SET status='active', moderated_at=?, moderated_by=? WHERE request_id=?",
@@ -4563,13 +4646,13 @@ async def moderate_approve(callback: CallbackQuery, bot: Bot):
     conn.close()
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        f"✅ Заявка #{request_id} одобрена. Проект появился в разделе «Проекты».\n"
+        f"✅ Проект #{request_id} одобрен. Проект появился в разделе «Проекты».\n"
         "Рассылку творцам запускаете вы вручную из карточки проекта."
     )
     try:
         await bot.send_message(
             request["business_user_id"],
-            f"✅ Ваша заявка #{request_id} прошла модерацию и стала активным проектом.",
+            f"✅ Ваш проект #{request_id} прошёл модерацию и стал активным проектом.",
             reply_markup=business_menu_kb(),
         )
     except Exception:
@@ -4588,7 +4671,7 @@ async def moderate_reject(callback: CallbackQuery, bot: Bot):
     request = conn.execute("SELECT * FROM requests WHERE request_id=?", (request_id,)).fetchone()
     if not request or request["status"] != "pending":
         conn.close()
-        await callback.answer("Заявка уже обработана", show_alert=True)
+        await callback.answer("Проект уже обработан", show_alert=True)
         return
     conn.execute(
         "UPDATE requests SET status='rejected', moderated_at=?, moderated_by=? WHERE request_id=?",
@@ -4597,11 +4680,11 @@ async def moderate_reject(callback: CallbackQuery, bot: Bot):
     conn.commit()
     conn.close()
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(f"❌ Заявка #{request_id} отклонена.")
+    await callback.message.answer(f"❌ Проект #{request_id} отклонён.")
     try:
         await bot.send_message(
             request["business_user_id"],
-            f"Заявка #{request_id} не прошла модерацию. Проверьте формулировку и создайте новую заявку.",
+            f"Проект #{request_id} не прошёл модерацию. Проверьте формулировку и создайте новый проект.",
             reply_markup=business_menu_kb(),
         )
     except Exception:
@@ -4630,7 +4713,7 @@ async def stats_text() -> str:
         f"Блогеры: {bloggers}\n"
         f"Контент-креаторы: {content_creators}\n"
         f"Бизнесы: {businesses}\n\n"
-        f"Заявки: {requests}\n"
+        f"Проекты: {requests}\n"
         f"На модерации: {pending}\n"
         f"Активные: {active}\n\n"
         f"Отклики: {responses}\n"
@@ -4742,35 +4825,43 @@ async def registered_businesses(callback: CallbackQuery):
 
 
 @router.message(F.text == "📁 Проекты")
-async def owner_requests(message: Message, actor_id: int | None = None):
+async def owner_requests(message: Message, actor_id: int | None = None, archive: bool = False, page: int = 0):
     if not is_admin(actor_id if actor_id is not None else message.from_user.id):
         return
     conn = db()
-    rows = conn.execute(
-        "SELECT * FROM requests WHERE status IN ('active','completed') ORDER BY request_id DESC LIMIT 30"
+    candidates = conn.execute(
+        "SELECT * FROM requests WHERE status IN ('active','completed') ORDER BY request_id DESC"
     ).fetchall()
     conn.close()
-    if not rows:
-        await message.answer("Проектов пока нет.", reply_markup=owner_reply_kb())
-        return
-
-    status_labels = {
-        "pending": "🟡 На модерации",
-        "active": "🟢 Активный",
-        "completed": "⚪️ Завершён",
-        "rejected": "🔴 Отклонён",
-    }
-
+    current = [r for r in candidates if project_distribution_open(r)]
+    archived = [r for r in candidates if not project_distribution_open(r)]
+    selected = archived if archive else current
+    page = max(0, min(page, max(0, (len(selected) - 1) // 30)))
+    rows = selected[page * 30:(page + 1) * 30]
+    section = "archive" if archive else "current"
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"📁 Текущие ({len(current)})", callback_data="owner_projects:current:0")
+    kb.button(text=f"🗄 Архив ({len(archived)})", callback_data="owner_projects:archive:0")
+    kb.adjust(2)
+    if page:
+        kb.row(InlineKeyboardButton(text="← Предыдущие", callback_data=f"owner_projects:{section}:{page - 1}"))
+    if (page + 1) * 30 < len(selected):
+        kb.row(InlineKeyboardButton(text="Следующие →", callback_data=f"owner_projects:{section}:{page + 1}"))
+    title = "Архив проектов" if archive else "Текущие проекты"
+    empty = "Архив пока пуст." if archive else "Сейчас текущих проектов нет."
     await message.answer(
-        f"<b>Проекты КЛИК</b>\nВсего показано: {len(rows)}",
-        reply_markup=owner_reply_kb()
+        f"<b>{title}</b>\n" + (f"Всего: {len(selected)} · Страница {page + 1}" if rows else empty),
+        reply_markup=kb.as_markup()
     )
     for r in rows:
-        status = r["status"] or "pending"
-        distribution_line = "\n" + distribution_summary(r)
-        prefix = f"<b>{status_labels.get(status, status)}</b>{distribution_line}"
-        markup = owner_project_kb(r["request_id"], status)
-        await send_request_card(message, r, reply_markup=markup, prefix=prefix)
+        if r["status"] == "completed":
+            label, button_status = "⚪️ Завершён", "completed"
+        elif archive:
+            label, button_status = "⌛ Приём откликов завершён", "completed"
+        else:
+            label, button_status = "🟢 Активный", "active"
+        prefix = f"<b>{label}</b>\n{distribution_summary(r)}"
+        await send_request_card(message, r, reply_markup=owner_project_kb(r["request_id"], button_status), prefix=prefix)
 
 
 @router.callback_query(F.data == "admin_requests")
@@ -4781,6 +4872,19 @@ async def admin_requests(callback: CallbackQuery):
     await owner_requests(callback.message, actor_id=callback.from_user.id)
     await callback.answer()
 
+
+@router.callback_query(F.data.startswith("owner_projects:"))
+async def owner_projects_section(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 3 or parts[1] not in {"current", "archive"} or not parts[2].isdigit():
+        await callback.answer()
+        return
+    await owner_requests(callback.message, actor_id=callback.from_user.id,
+                         archive=parts[1] == "archive", page=int(parts[2]))
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("owner_delete_project:"))
@@ -5076,7 +5180,7 @@ def export_excel_bytes() -> bytes:
         "Бизнес": conn.execute(
             "SELECT user_id, business_name, city, niche, social_link, contact FROM business_profiles ORDER BY user_id"
         ).fetchall(),
-        "Заявки": conn.execute(
+        "Проекты": conn.execute(
             "SELECT request_id, business_user_id, business_name, city, niche, creator_needed, task, photo_file_id, content_types, content_quantity, on_camera, work_format, requirements, creator_skills, product_provided, cooperation_format, budget, response_deadline, delivery_deadline, extra_info, social_link, contact, status, created_at FROM requests ORDER BY request_id"
         ).fetchall(),
         "Отклики": conn.execute(
@@ -5156,26 +5260,11 @@ async def cancel_action(message: Message, state: FSMContext):
 
 @router.message(BroadcastForm.text)
 async def owner_broadcast_send(message: Message, state: FSMContext, bot: Bot):
+    # Old persisted dialogs also go through the new preview, never straight to sending.
     if not is_admin(message.from_user.id):
-        await state.clear()
         return
-    text = message.html_text or message.text or ""
-    conn = db()
-    users = conn.execute("SELECT user_id FROM users ORDER BY user_id").fetchall()
-    conn.close()
-    sent = 0
-    failed = 0
-    for row in users:
-        try:
-            await bot.send_message(row["user_id"], text)
-            sent += 1
-        except Exception:
-            failed += 1
-    await state.clear()
-    await message.answer(
-        f"Рассылка завершена.\n\nОтправлено: {sent}\nНе доставлено: {failed}",
-        reply_markup=owner_reply_kb(),
-    )
+    await state.update_data(_audience="all")
+    await owner_ui.broadcast_preview(message, message.from_user.id, state, message.html_text or message.text or "")
 
 
 @router.message(F.text == "👤 Режим пользователя")
@@ -5387,8 +5476,9 @@ async def main():
     init_support_tables()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     bot.session.middleware(CaptureFormPrompt())
+    bot.session.middleware(StyleMessages(owner_ui))
     from aiogram.fsm.storage.memory import SimpleEventIsolation
-    dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
+    dp = Dispatcher(storage=PersistentStorage(db), events_isolation=SimpleEventIsolation())
     dp.include_router(router)
     digest_task = asyncio.create_task(supervise_job(send_business_daily_digests, bot))
     project_distribution_task = asyncio.create_task(supervise_job(send_daily_project_distributions, bot))
@@ -5398,6 +5488,12 @@ async def main():
         digest_task.cancel()
         project_distribution_task.cancel()
         await asyncio.gather(digest_task, project_distribution_task, return_exceptions=True)
+
+
+ui = Interface(globals())
+ui.install()
+owner_ui = OwnerInterface(globals())
+owner_ui.install()
 
 
 if __name__ == "__main__":
